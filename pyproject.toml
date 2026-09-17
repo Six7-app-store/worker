@@ -171,6 +171,12 @@ omit = [
 precision = 2
 show_missing = true
 skip_covered = false
+# Ratsche gegen Degradation: der Lauf schlaegt fehl, wenn die Abdeckung
+# unter diesen Wert faellt. Bewusst niedrig angesetzt, damit das Gate beim
+# Einbau nicht sofort rot ist — nach dem ersten echten Coverage-Lauf auf
+# knapp unter den Ist-Wert hochziehen und nie wieder senken.
+# Das Backend steht bei 50.
+fail_under = 40
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
