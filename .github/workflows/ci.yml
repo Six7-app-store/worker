@@ -461,63 +461,26 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ================================================================
-  # 🚀 DEPLOY ANSTOSSEN — nur auf main
-  # ================================================================
-  # Hier stand lange ein Kommentar, der erklärte, warum es diesen Job
-  # *nicht* gibt: der Deploy war ins eigene Forgejo umgezogen, und ein
-  # Token als GitHub-Secret wäre genau die Kopplung gewesen, die man an
-  # einem öffentlichen Repository nicht haben will.
-  #
-  # Der Deploy läuft jetzt wieder über GitHub, weil ein durchgehender
-  # Prozess im GitHub-Repo verlangt ist. Die damalige Sorge ist damit
-  # nicht verschwunden, sondern nur verlagert: mit dem Token unten lässt
-  # sich ein Deploy auslösen, und dieses Repository ist öffentlich.
-  #
-  # Was sie klein hält:
-  #   - Der Job läuft nur bei `push` auf main, nie aus einem Pull
-  #     Request. Wer von einem Fork aus einen PR öffnet, erreicht ihn
-  #     nicht, und Secrets bekommt ein Fork-PR ohnehin keine.
-  #   - `repository_dispatch` kann nichts weiter als den Deploy
-  #     anstoßen. Das Token braucht dafür Schreibrecht auf genau *ein*
-  #     Repository, nicht auf die Organisation.
-  #   - Der Deploy prüft seinerseits erneut, ob er laufen darf, und hält
-  #     ohne die OpenStack-Secrets sofort an.
-  #
-  # Fehlt das Token, endet der Job mit einer Warnung statt mit einem
-  # Fehler — eine noch nicht eingerichtete Automatik soll keinen grünen
-  # Build rot färben.
-  notify-deploy:
-    name: "🚀 Deploy anstoßen"
-    runs-on: ubuntu-latest
-    needs: [push]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      - name: repository_dispatch an das deployment-Repo senden
-        env:
-          TOKEN: ${{ secrets.DEPLOY_DISPATCH_TOKEN }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::warning::DEPLOY_DISPATCH_TOKEN fehlt - es wird kein Deploy angestoßen."
-            echo "Anlegen: Fine-grained PAT mit Contents:write auf Six7-app-store/deployment,"
-            echo "dann hier unter Settings -> Secrets and variables -> Actions hinterlegen."
-            exit 0
-          fi
-          # printf statt verschachtelter Anführungszeichen im -d Argument;
-          # das spart eine Ebene Shell-Escaping und bleibt lesbar.
-          payload=$(printf '{"event_type":"service-image-published","client_payload":{"repo":"%s","sha":"%s"}}' \
-                    "$GITHUB_REPOSITORY" "$GITHUB_SHA")
-          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/Six7-app-store/deployment/dispatches \
-            -d "$payload")
-          # /dispatches antwortet im Erfolgsfall mit 204 und ohne Rumpf.
-          if [ "$code" = "204" ]; then
-            echo "Deploy angestoßen (HTTP 204)."
-          else
-            echo "::error::Dispatch fehlgeschlagen (HTTP $code)"
-            cat /tmp/resp.json || true
-            exit 1
-          fi
+# Hier endet die Pipeline, und zwar mit Absicht.
+#
+# Das Image liegt jetzt in GHCR. Es auf die OpenStack-VM zu bringen ist ein
+# eigener, von Hand ausgeführter Schritt — beschrieben in
+# deployment/docs/deploy-runbook.md.
+#
+# Der Grund ist nicht Bequemlichkeit, sondern das Netz. Die OpenStack-API der
+# DHBW ist von außen nicht erreichbar; gemessen von einem GitHub-Runner aus
+# (öffentliche IP 145.132.101.182):
+#
+#   DNS newstack.dhbw.cloud -> 141.72.5.140   löst öffentlich auf
+#   https://...:5000/v3     -> 000 TIMEOUT    Keystone
+#   https://...:443/        -> 000 TIMEOUT    Horizon
+#
+# Der Name ist öffentlich, das Netz ist es nicht. GitHubs gehostete Runner
+# können also grundsätzlich nicht ausrollen, unabhängig von Zugangsdaten.
+#
+# Automatisieren ließe sich das nur mit einem self-hosted Runner im
+# Campusnetz. Dagegen spricht mehr als der Aufwand: dieses Repository ist
+# öffentlich, und ein self-hosted Runner an einem öffentlichen Repository
+# gibt jedem, der einen Pull Request öffnen kann, eine Ausführungsumgebung
+# mit Produktionszugang. Solange der Deploy ein Mensch im VPN startet,
+# stellt sich die Frage nicht.
