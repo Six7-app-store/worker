@@ -278,3 +278,28 @@ class TestContextManager:
             assert lock._held is True
 
         assert lock._held is False
+
+
+@pytest.mark.unit
+class TestRedisClientFactory:
+    """The one place that decides which Redis the lock lives in.
+
+    The lock is only correct if every worker talks to the *same* Redis -
+    a second instance would hand out the same lock twice and let two
+    Packer builds race on the same image. So the factory must read the
+    configured backend URL and nothing else.
+    """
+
+    def test_redis_client_uses_the_configured_backend_url(self, mocker):
+        """``_redis_client`` passes CELERY_RESULT_BACKEND straight to from_url."""
+        mocker.patch.object(
+            build_lock_module.settings,
+            "CELERY_RESULT_BACKEND",
+            "redis://configured-host:6379/7",
+        )
+        from_url = mocker.patch.object(build_lock_module.redis.Redis, "from_url")
+
+        client = build_lock_module._redis_client()
+
+        from_url.assert_called_once_with("redis://configured-host:6379/7")
+        assert client is from_url.return_value
