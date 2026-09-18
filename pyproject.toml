@@ -138,6 +138,16 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
+    # Nimmt das Gate aus jedem pytest-Lauf heraus. Beide CI-Lanes sind
+    # Teillaeufe (``-m unit`` bzw. ``-m integration``) und erreichen per
+    # Konstruktion keine Gesamtabdeckung - die Integration-Lane deckt nur
+    # den git_service ab. Dort zu pruefen misst nur, wie viel vom
+    # Gesamtcode zufaellig in der Lane liegt.
+    #
+    # ``coverage report``/``html`` im coverage-Job lesen ``addopts`` nicht
+    # und behalten damit ``fail_under`` weiter unten - dort, auf dem
+    # kombinierten Stand, gehoert das Gate hin.
+    "--cov-fail-under=0",
     # Globaler Per-Test-Timeout: kein einzelner Test darf den
     # Gesamtlauf einfrieren. 60 s ist großzügig für Git-Clone-Mocks
     # und subprocess-Calls, aber knapp genug, dass ein echter Hänger
@@ -172,11 +182,17 @@ precision = 2
 show_missing = true
 skip_covered = false
 # Ratsche gegen Degradation: der Lauf schlaegt fehl, wenn die Abdeckung
-# unter diesen Wert faellt. Bewusst niedrig angesetzt, damit das Gate beim
-# Einbau nicht sofort rot ist — nach dem ersten echten Coverage-Lauf auf
-# knapp unter den Ist-Wert hochziehen und nie wieder senken.
-# Das Backend steht bei 50.
-fail_under = 40
+# unter diesen Wert faellt. Nie wieder senken.
+#
+# Von 40 auf 90 gezogen, wie es der vorige Kommentar vorsah: der erste
+# echte Coverage-Lauf steht bei 93.07 %, die 40 waren nur der Startwert,
+# damit das Gate beim Einbau nicht sofort rot ist.
+#
+# Greift ausschliesslich im ``coverage``-Job auf dem kombinierten Stand:
+# ``coverage combine`` gefolgt von ``coverage report``/``html``. Die
+# pytest-Laeufe umgehen den Wert ueber ``--cov-fail-under=0`` in
+# ``addopts`` (Begruendung dort).
+fail_under = 90
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

@@ -1,7 +1,9 @@
 """Tests for Git service."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import git
 import pytest
 
 from app.services.git_service import GitService
@@ -168,13 +170,117 @@ class TestGitServiceCleanup:
         assert not nonexistent.exists()
 
 
+class TestGitServiceCloneFailureCleanup:
+    """Die Aufraeum-Zweige in beiden except-Handlern.
+
+    ``clone_release`` entfernt ein vorhandenes Ziel *vor* dem Klonen. Ein
+    Verzeichnis, das beim Fehlschlag existiert, kann also nur der Klon
+    selbst angelegt haben - git laesst einen halben Checkout stehen, wenn
+    es mitten im Transfer stirbt. Ohne das rmtree startet der naechste
+    Deploy derselben ID auf diesem Schutt.
+    """
+
+    @patch("app.services.git_service.git.Repo.clone_from")
+    def test_partial_checkout_is_removed_after_a_git_error(self, mock_clone, git_service, tmp_path):
+        """GitCommandError-Pfad: Schutt weg, Meldung durchgereicht."""
+        target = tmp_path / "deploy_git-err"
+
+        def _leave_debris(*_args, **_kwargs):
+            (target / ".git").mkdir(parents=True, exist_ok=True)
+            raise git.exc.GitCommandError("clone", 128, stderr="remote hung up")
+
+        mock_clone.side_effect = _leave_debris
+
+        with pytest.raises(Exception, match="Git command failed"):
+            git_service.clone_release("https://github.com/test/repo.git", "v1.0.0", "git-err")
+
+        assert not target.exists()
+
+    @patch("app.services.git_service.git.Repo.clone_from")
+    def test_partial_checkout_is_removed_after_an_unexpected_error(self, mock_clone, git_service, tmp_path):
+        """Derselbe Schutz im generischen Handler, nicht nur bei Git-Fehlern."""
+        target = tmp_path / "deploy_other-err"
+
+        def _leave_debris(*_args, **_kwargs):
+            target.mkdir(parents=True, exist_ok=True)
+            raise MemoryError("out of memory mid-clone")
+
+        mock_clone.side_effect = _leave_debris
+
+        with pytest.raises(Exception, match="Failed to clone"):
+            git_service.clone_release("https://github.com/test/repo.git", "v1.0.0", "other-err")
+
+        assert not target.exists()
+
+
+@pytest.fixture
+def source_repo(tmp_path):
+    """Ein echtes lokales Git-Repository: zwei Commits, Tag auf dem ersten.
+
+    Der zweite Commit ist der Punkt der Uebung - nur so zeigt sich, ob
+    ``clone_release`` wirklich den Tag auscheckt und nicht einfach HEAD.
+    """
+    src = tmp_path / "source"
+    src.mkdir()
+    repo = git.Repo.init(src)
+    with repo.config_writer() as cw:
+        cw.set_value("user", "name", "Test")
+        cw.set_value("user", "email", "test@example.invalid")
+
+    (src / "version.txt").write_text("v1\n")
+    repo.index.add(["version.txt"])
+    repo.index.commit("erste Fassung")
+    repo.create_tag("v1.0.0")
+
+    (src / "version.txt").write_text("spaeter\n")
+    repo.index.add(["version.txt"])
+    repo.index.commit("danach")
+
+    return src
+
+
 @pytest.mark.integration
 class TestGitServiceIntegration:
-    """Integration tests (require actual Git access)."""
+    """Integrationstests gegen ein echtes Git-Repository.
 
-    @pytest.mark.skip(reason="Requires actual Git repository access")
-    def test_clone_real_repository(self, git_service):
-        """Test cloning a real public repository."""
-        # This test would require a real public repository
-        # Skip by default to avoid external dependencies
-        pass
+    Kein Netzzugriff: das Gegenstueck ist ein lokal angelegtes Repository,
+    das ueber eine ``file://``-URL geklont wird. Die URL-Form ist nicht
+    beliebig - bei einem reinen Pfad-Klon ignoriert git ``--depth``, der
+    Shallow-Clone waere dann ungeprueft. ``_get_authenticated_url`` laesst
+    ``file://`` unangetastet, weil es weder mit ``git@`` noch mit
+    ``https://`` beginnt.
+
+    Diese Lane lief zuvor leer: sie enthielt einen einzigen, mit
+    ``skip`` markierten Platzhalter, wodurch der Coverage-Wert des Laufs
+    auf 0 fiel und das Gate den Job kippte.
+    """
+
+    def test_clone_release_checks_out_the_tag_not_head(self, git_service, source_repo, tmp_path):
+        """Der Tag zeigt auf den ersten Commit, HEAD auf den zweiten."""
+        path = git_service.clone_release(source_repo.as_uri(), "v1.0.0", "int-tag")
+
+        assert Path(path) == tmp_path / "deploy_int-tag"
+        assert (Path(path) / "version.txt").read_text() == "v1\n"
+
+    def test_clone_release_is_shallow(self, git_service, source_repo):
+        """depth=1: im Klon darf genau ein Commit liegen."""
+        path = git_service.clone_release(source_repo.as_uri(), "v1.0.0", "int-shallow")
+
+        assert len(list(git.Repo(path).iter_commits())) == 1
+
+    def test_clone_release_replaces_an_existing_checkout(self, git_service, source_repo):
+        """Ein zweiter Lauf raeumt den alten Stand weg, statt ihn zu mischen."""
+        first = git_service.clone_release(source_repo.as_uri(), "v1.0.0", "int-again")
+        (Path(first) / "stale.txt").write_text("alt\n")
+
+        second = git_service.clone_release(source_repo.as_uri(), "v1.0.0", "int-again")
+
+        assert first == second
+        assert not (Path(second) / "stale.txt").exists()
+
+    def test_clone_release_raises_and_cleans_up_for_unknown_tag(self, git_service, source_repo, tmp_path):
+        """Ein fehlender Tag darf kein halbes Verzeichnis hinterlassen."""
+        with pytest.raises(Exception, match="Git command failed"):
+            git_service.clone_release(source_repo.as_uri(), "v9.9.9", "int-missing")
+
+        assert not (tmp_path / "deploy_int-missing").exists()

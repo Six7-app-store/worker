@@ -543,3 +543,68 @@ class TestStatePull:
         mocker.patch.object(te_mod.subprocess, "run", side_effect=OSError("nope"))
         ex = TerraformExecutor(str(tmp_path))
         assert ex.state_pull() is None
+
+
+@pytest.mark.unit
+class TestDestroyRefreshFlag:
+    """The -refresh=false escape hatch for a destroy that refresh would block."""
+
+    def test_destroy_without_refresh_adds_the_flag(self, mocker, tmp_path):
+        """refresh=False is the documented way past a resource deleted out-of-band."""
+        stream = _patch_stream(mocker, returncode=0)
+        ex = TerraformExecutor(str(tmp_path))
+
+        ok, _, _ = ex.destroy(refresh=False)
+
+        assert ok is True
+        assert "-refresh=false" in stream.call_args.args[0]
+
+    def test_destroy_with_refresh_omits_the_flag(self, mocker, tmp_path):
+        """The default stays a refreshing destroy - the flag must not leak in."""
+        stream = _patch_stream(mocker, returncode=0)
+        ex = TerraformExecutor(str(tmp_path))
+
+        ex.destroy(refresh=True)
+
+        assert "-refresh=false" not in stream.call_args.args[0]
+
+
+class _ExplodingStdout:
+    """A pipe that dies mid-read, the way a killed child's stdout does."""
+
+    def __init__(self, lines_before_failure):
+        self._lines = list(lines_before_failure)
+
+    def __iter__(self):
+        yield from self._lines
+        raise OSError("pipe went away")
+
+
+@pytest.mark.unit
+class TestDrainSurvivesABrokenPipe:
+    """The reader thread must not take the run down with it.
+
+    It runs as a daemon thread, so an exception there would not fail the
+    caller - it would just silently stop draining while ``wait()`` still
+    returns 0. The blanket ``except`` in ``_drain_stdout`` is what keeps
+    the already-read lines and the real return code intact.
+    """
+
+    def test_a_broken_stdout_pipe_does_not_abort_the_run(self, mocker, tmp_path):
+        """Lines read before the failure survive; the return code still arrives."""
+        fake = FakePopen(returncode=0)
+        fake.stdout = _ExplodingStdout(["kept-1\n", "kept-2\n"])
+        mocker.patch.object(te_mod.subprocess, "Popen", return_value=fake)
+
+        rc, stdout, stderr = _stream_subprocess(
+            ["terraform", "apply"],
+            cwd=str(tmp_path),
+            env={},
+            timeout=5,
+            tool_name="terraform_apply",
+            output_callback=None,
+        )
+
+        assert rc == 0
+        assert stdout == "kept-1\nkept-2"
+        assert stderr == ""
