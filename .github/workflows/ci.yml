@@ -461,11 +461,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-# Hier endet die Pipeline, und zwar mit Absicht.
+# Hier endet diese Datei, aber nicht die Pipeline.
 #
-# Das Image liegt jetzt in GHCR. Es auf die OpenStack-VM zu bringen ist ein
-# eigener, von Hand ausgeführter Schritt — beschrieben in
-# deployment/docs/deploy-runbook.md.
+# Das Image liegt jetzt in GHCR. Ausgerollt wird es von
+# trigger-staging-deploy.yml nebenan: der Workflow wartet das Ende dieses
+# Laufs ab und stößt im deployment-Repository den Neuaufbau des Staging-Stacks
+# an. Siehe deployment/docs/adr/0002 und 0003.
 #
 # Der Grund ist nicht Bequemlichkeit, sondern das Netz. Die OpenStack-API der
 # DHBW ist von außen nicht erreichbar; gemessen von einem GitHub-Runner aus
@@ -478,9 +479,12 @@ jobs:
 # Der Name ist öffentlich, das Netz ist es nicht. GitHubs gehostete Runner
 # können also grundsätzlich nicht ausrollen, unabhängig von Zugangsdaten.
 #
-# Automatisieren ließe sich das nur mit einem self-hosted Runner im
-# Campusnetz. Dagegen spricht mehr als der Aufwand: dieses Repository ist
-# öffentlich, und ein self-hosted Runner an einem öffentlichen Repository
-# gibt jedem, der einen Pull Request öffnen kann, eine Ausführungsumgebung
-# mit Produktionszugang. Solange der Deploy ein Mensch im VPN startet,
-# stellt sich die Frage nicht.
+# Deshalb läuft der Deploy auf einem self-hosted Runner im Campusnetz. Der
+# Einwand dagegen galt und gilt: dieses Repository ist öffentlich, und ein
+# self-hosted Runner daran gäbe jedem, der einen Fork-PR öffnet, eine
+# Ausführungsumgebung mit OpenStack-Zugang.
+#
+# Genau deshalb hängt der Runner nicht hier. Er ist ausschließlich am
+# deployment-Repository registriert, und kein Workflow darauf hat einen
+# pull_request-Trigger. Dieses Repository schickt nur einen repository_dispatch
+# dorthin — es kennt kein einziges Zugangsdatum zu OpenStack.
