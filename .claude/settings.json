@@ -1,0 +1,32 @@
+{
+  "enabledPlugins": {
+    "context7@claude-plugins-official": true
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python || command -v python3); [ -n \"$P\" ] && \"$P\" .claude/hooks/agent_guard.py lint; exit 0",
+            "timeout": 90,
+            "statusMessage": "ruff + black + isort"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "docker ps >/dev/null 2>&1 || exit 0; docker exec worker-dev poetry run ruff check . >/dev/null 2>&1 && docker exec worker-dev poetry run black --check . >/dev/null 2>&1 && docker exec worker-dev poetry run isort --check-only . >/dev/null 2>&1 || printf '%s' '{\"decision\":\"block\",\"reason\":\"Lint schlaegt fehl. Pruefen: ruff check . / black --check . / isort --check-only . im Container worker-dev.\"}'; exit 0",
+            "timeout": 150,
+            "statusMessage": "Lint-Gate"
+          }
+        ]
+      }
+    ]
+  }
+}
