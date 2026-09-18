@@ -1,0 +1,85 @@
+name: CD - Staging-Deploy anstossen
+
+# Schliesst die Luecke zwischen Merge und Staging: sobald die CI auf `main`
+# durch ist und das neue Image in GHCR liegt, startet dieser Workflow den
+# Deploy auf dem Forgejo-Runner im Campusnetz.
+#
+# Warum ueber Forgejo und nicht hier: Die OpenStack-API der DHBW ist von aussen
+# nicht erreichbar, ein GitHub-Runner kommt gar nicht erst hin. Der Forge-Host
+# steht im richtigen Netz. Die ganze Begruendung samt Messwerten steht in
+# deployment/docs/deployment-process.md, Abschnitt 6 und 11.
+#
+# Dieser Job traegt KEINE Zugangsdaten zu OpenStack, keinen SSH-Schluessel und
+# keine .env. Er kennt nur die Adresse des Forge-Hosts und zwei Token. Alles
+# Weitere liegt ausschliesslich in Forgejo.
+
+on:
+  # Nicht `push`, sondern das Ende des CI-Laufs: erst wenn Worker CI/CD
+  # erfolgreich war, existiert das Image, das der Deploy ziehen soll. Bei
+  # `push` wuerde der Deploy gegen das alte Image laufen.
+  workflow_run:
+    workflows: ["Worker CI/CD"]
+    types: [completed]
+    branches: [main]
+
+# Der Job braucht nichts von GitHub - er ruft nur nach draussen.
+permissions: {}
+
+# Zwei Merges kurz hintereinander sollen nicht zwei Deploys uebereinander
+# starten. Der zweite wartet; abgebrochen wird nichts, weil ein laufender
+# terraform apply nichts ist, das man auf halber Strecke stehen laesst.
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: "Deploy anstossen"
+    # Nur bei gruener CI. Ohne diese Zeile liefe der Deploy auch nach einem
+    # fehlgeschlagenen Lauf - workflow_run feuert bei jedem Ende.
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Konfiguration pruefen
+        env:
+          BASE_URL: ${{ secrets.FORGEJO_BASE_URL }}
+          REPO: ${{ secrets.FORGEJO_DEPLOY_REPO }}
+          TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          AUTH: ${{ secrets.FORGEJO_DISPATCH_AUTH }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -z "${BASE_URL:-}" ] && missing="$missing FORGEJO_BASE_URL"
+          [ -z "${REPO:-}" ]     && missing="$missing FORGEJO_DEPLOY_REPO"
+          [ -z "${TOKEN:-}" ]    && missing="$missing FORGEJO_TOKEN"
+          [ -z "${AUTH:-}" ]     && missing="$missing FORGEJO_DISPATCH_AUTH"
+          if [ -n "$missing" ]; then
+            echo "::error::Fehlende Repository-Secrets:$missing" >&2
+            echo "Anleitung: deployment/docs/deployment-process.md, Abschnitt 11." >&2
+            exit 1
+          fi
+
+      - name: Deploy auf dem Forgejo-Runner starten
+        env:
+          BASE_URL: ${{ secrets.FORGEJO_BASE_URL }}
+          REPO: ${{ secrets.FORGEJO_DEPLOY_REPO }}
+          TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          AUTH: ${{ secrets.FORGEJO_DISPATCH_AUTH }}
+        run: |
+          set -euo pipefail
+          # --retry faengt die Faelle ab, in denen der Campus-Uplink kurz
+          # klemmt. Ausgegeben wird nur der Statuscode: die Antwort koennte
+          # sonst Kopfzeilen ins oeffentliche Log tragen.
+          code=$(curl -sS -o /dev/null -w '%{http_code}'             --retry 3 --retry-connrefused --retry-delay 5 --max-time 30             -X POST             -H "Authorization: token $TOKEN"             -H "X-Deploy-Auth: $AUTH"             -H "Content-Type: application/json"             -d '{"ref":"main","inputs":{"mode":"apply","seed":"false"}}'             "$BASE_URL/api/v1/repos/$REPO/actions/workflows/staging.yml/dispatches")
+
+          case "$code" in
+            20*) echo "Deploy angestossen (HTTP $code)." ;;
+            404) echo "::error::HTTP 404 - Caddy laesst den Pfad nicht durch oder X-Deploy-Auth stimmt nicht." >&2; exit 1 ;;
+            401|403) echo "::error::HTTP $code - der Forgejo-Token ist abgelaufen oder hat keine Rechte am Repository." >&2; exit 1 ;;
+            000) echo "::error::Keine Verbindung - Port zu, Host aus oder Zertifikat abgelaufen." >&2; exit 1 ;;
+            *) echo "::error::Unerwartete Antwort HTTP $code." >&2; exit 1 ;;
+          esac
+
+          echo "Der Lauf selbst steht in Forgejo unter Actions - dieser Job wartet nicht darauf."
