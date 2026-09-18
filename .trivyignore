@@ -12,11 +12,10 @@
 # bind-mount UIDs line up on macOS + Linux. Tracked in #16.
 AVD-DS-0002
 
-# Packer upstream CVE backlog — Packer's latest release (v1.15.3)
-# still ships with Go 1.25.9 and a handful of outdated modules.
-# Nothing to fix on our side; we just bump PACKER_VERSION when
-# HashiCorp ships a release built against Go 1.25.10+. Tracked
-# in #18.
+# Packer upstream CVE backlog — Packer's latest release (v1.16.0)
+# still ships outdated modules. Nothing to fix on our side; we bump
+# PACKER_VERSION when HashiCorp ships a release that clears these.
+# Tracked in #18.
 #
 # Go stdlib (fixed in 1.25.10):
 CVE-2026-33811
@@ -39,11 +38,9 @@ CVE-2026-53488
 CVE-2026-53489
 CVE-2026-53492
 
-# Terraform upstream CVE backlog — Terraform's latest stable release
-# (v1.15.5) is built against Go 1.25.9; HashiCorp hasn't yet shipped
-# a rebuild against Go 1.25.11+. Nothing to fix on our side; we bump
-# TERRAFORM_VERSION as soon as HashiCorp ships a release built against
-# Go 1.25.11 / 1.26.4 or later.
+# Terraform upstream CVE backlog — entries here wait on a HashiCorp
+# rebuild. Terraform now runs v1.16.3; anything below that a newer
+# release clears should be deleted rather than carried along.
 #
 # Go stdlib (fixed in 1.25.11 / 1.26.4):
 CVE-2026-42504
@@ -107,6 +104,27 @@ CVE-2026-56864
 CVE-2026-56865
 # google.golang.org/grpc (fixed in 1.83.1):
 CVE-2026-84304
+# CVE-2026-84445 — gRPC-Go denial of service via malformed RPC requests,
+# fixed in grpc 1.82.2 / 1.83.2.
+#
+# Der Versionssprung löst das nur zur Hälfte, nachgemessen an den
+# Binaries selbst (google.golang.org/grpc aus der Go-Build-Info):
+#
+#   terraform 1.15.5 -> v1.80.0   |   1.16.3 -> v1.83.2   behoben
+#   packer    1.15.3 -> v1.79.3   |   1.16.0 -> v1.82.1   weiterhin offen
+#
+# Packer 1.16.0 ist die neueste Veröffentlichung und liegt genau eine
+# Patch-Version unter dem Fix. Es gibt also keinen Build, der das klärt.
+#
+# Warum das hier vertretbar ist: Packer und Terraform benutzen gRPC
+# ausschließlich zur Verständigung mit ihren eigenen Plugins, über einen
+# lokalen Socket im selben Container. Ein Angreifer müsste bereits in
+# diesem Container Code ausführen, um die fehlerhaften Anfragen
+# abzusetzen — dann ist der Denial of Service das kleinere Problem.
+# Nichts davon ist von außen erreichbar.
+#
+# Entfernen, sobald Packer > 1.16.0 mit grpc >= 1.82.2 erscheint.
+CVE-2026-84445
 # go-git, vendored into Packer (fixed in 5.19.2):
 CVE-2026-71556
 # CVE-2026-56854 is the one CRITICAL here: golang.org/x/crypto/ssh fails to

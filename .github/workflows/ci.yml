@@ -6,6 +6,10 @@ on:
     tags: ['v*.*.*']
   pull_request:
     branches: [main]
+  # Von Hand auslösbar. Ohne diesen Trigger lässt sich die Pipeline nur
+  # durch einen Commit starten — für eine Vorführung oder nach einem
+  # behobenen Infrastrukturproblem ist das unnötig umständlich.
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -457,17 +461,26 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-# Hier stand ein Job, der nach dem Push auf main den Staging-Deploy angestoßen
-# hat. Er ist entfallen, als der Deploy in unser eigenes Forgejo umgezogen ist
-# (deployment/docs/staging-setup.md), und zwar bewusst und nicht nur, weil sein
-# Secret hier fehlt:
+# Hier endet die Pipeline, und zwar mit Absicht.
 #
-# Ihn auf Forgejo umzubiegen hieße, ein Forgejo-Token als GitHub-Secret zu
-# hinterlegen — also ein Zugangsdatum, mit dem sich von einem öffentlichen
-# Repository aus unser Deploy auslösen lässt. Genau diese Kopplung soll es nicht
-# geben; deshalb baut diese CI nur das Image, und das Ausrollen beginnt auf der
-# anderen Seite.
+# Das Image liegt jetzt in GHCR. Es auf die OpenStack-VM zu bringen ist ein
+# eigener, von Hand ausgeführter Schritt — beschrieben in
+# deployment/docs/deploy-runbook.md.
 #
-# Der Preis dafür ist der verlorene Automatismus: ein Merge nach main rollt
-# nichts mehr aus, das geschieht in Forgejo von Hand. Wer ihn zurückholen will,
-# baut den Auslöser dort, nicht hier.
+# Der Grund ist nicht Bequemlichkeit, sondern das Netz. Die OpenStack-API der
+# DHBW ist von außen nicht erreichbar; gemessen von einem GitHub-Runner aus
+# (öffentliche IP 145.132.101.182):
+#
+#   DNS newstack.dhbw.cloud -> 141.72.5.140   löst öffentlich auf
+#   https://...:5000/v3     -> 000 TIMEOUT    Keystone
+#   https://...:443/        -> 000 TIMEOUT    Horizon
+#
+# Der Name ist öffentlich, das Netz ist es nicht. GitHubs gehostete Runner
+# können also grundsätzlich nicht ausrollen, unabhängig von Zugangsdaten.
+#
+# Automatisieren ließe sich das nur mit einem self-hosted Runner im
+# Campusnetz. Dagegen spricht mehr als der Aufwand: dieses Repository ist
+# öffentlich, und ein self-hosted Runner an einem öffentlichen Repository
+# gibt jedem, der einen Pull Request öffnen kann, eine Ausführungsumgebung
+# mit Produktionszugang. Solange der Deploy ein Mensch im VPN startet,
+# stellt sich die Frage nicht.
