@@ -108,3 +108,8 @@ worker_repos/
 # -----------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+
+# Persoenliche Claude-Code-Einstellungen. Die geteilte Basis liegt in
+# .claude/settings.json und gehoert ins Repository; was hier landet, gilt
+# nur fuer einen Rechner und darf niemandem sonst die Hooks umstellen.
+.claude/settings.local.json

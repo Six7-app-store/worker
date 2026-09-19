@@ -3,17 +3,30 @@
     "context7@claude-plugins-official": true
   },
   "hooks": {
-    "PostToolUse": [
+    "PreToolUse": [
       {
-        "matcher": "Edit|Write",
         "hooks": [
           {
             "type": "command",
-            "command": "P=$(command -v python || command -v python3); [ -n \"$P\" ] && \"$P\" .claude/hooks/agent_guard.py lint; exit 0",
-            "timeout": 90,
-            "statusMessage": "ruff + black + isort"
+            "command": "P=$(command -v python || command -v python3); [ -n \"$P\" ] && \"$P\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent_guard.py\" pre; exit 0",
+            "timeout": 15,
+            "statusMessage": "Secret- und Migrationsschutz"
           }
-        ]
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python || command -v python3); [ -n \"$P\" ] && \"$P\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent_guard.py\" lint; exit 0",
+            "timeout": 90,
+            "statusMessage": "Auto-Format"
+          }
+        ],
+        "matcher": "Edit|Write"
       }
     ],
     "Stop": [
@@ -21,12 +34,128 @@
         "hooks": [
           {
             "type": "command",
-            "command": "docker ps >/dev/null 2>&1 || exit 0; docker exec worker-dev poetry run ruff check . >/dev/null 2>&1 && docker exec worker-dev poetry run black --check . >/dev/null 2>&1 && docker exec worker-dev poetry run isort --check-only . >/dev/null 2>&1 || printf '%s' '{\"decision\":\"block\",\"reason\":\"Lint schlaegt fehl. Pruefen: ruff check . / black --check . / isort --check-only . im Container worker-dev.\"}'; exit 0",
-            "timeout": 150,
-            "statusMessage": "Lint-Gate"
+            "command": "P=$(command -v python || command -v python3); [ -n \"$P\" ] && \"$P\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent_guard.py\" stop; exit 0",
+            "timeout": 300,
+            "statusMessage": "Qualitaets-Gate"
           }
         ]
       }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.local)",
+      "Read(.env.staging)",
+      "Read(.env.prod)",
+      "Read(.env.production)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/clouds.yaml)",
+      "Edit(.env)",
+      "Edit(.env.local)",
+      "Edit(.env.staging)",
+      "Edit(.env.prod)",
+      "Edit(.env.production)",
+      "Edit(**/*.pem)",
+      "Edit(**/*.key)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push * main)",
+      "Bash(git push * master)",
+      "Bash(git push * HEAD:main)",
+      "Bash(git push origin main)",
+      "Bash(gh pr merge *)",
+      "Bash(make prod*)",
+      "Bash(docker compose -f docker-compose.prod.yml *)",
+      "Bash(docker-compose -f docker-compose.prod.yml *)",
+      "Bash(docker compose -f docker-compose.staging.yml *)",
+      "Bash(docker-compose -f docker-compose.staging.yml *)",
+      "Bash(deploy.cmd *)",
+      "Bash(./deploy.cmd *)",
+      "Bash(scripts/deploy.sh *)",
+      "Bash(./scripts/deploy.sh *)",
+      "Bash(terraform apply *)",
+      "Bash(terraform destroy *)",
+      "Bash(terraform state *)",
+      "Bash(terraform import *)",
+      "Bash(docker system prune *)",
+      "Bash(docker volume rm *)",
+      "Bash(docker volume prune *)",
+      "Bash(rm -rf *)",
+      "Bash(docker exec backend-dev env *)",
+      "Bash(docker exec backend-dev printenv *)",
+      "Bash(docker exec worker-dev env *)",
+      "Bash(docker exec worker-dev printenv *)",
+      "Bash(docker exec backend-dev alembic downgrade base *)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean *)",
+      "Bash(git rebase *)",
+      "Bash(terraform plan *)",
+      "Bash(gh workflow run *)",
+      "Bash(docker compose down *)",
+      "Bash(make db-reset-dev*)",
+      "Bash(make keycloak-reset*)",
+      "Bash(make clean-all*)",
+      "Bash(make prune*)"
+    ],
+    "allow": [
+      "Bash(docker exec backend-dev poetry run *)",
+      "Bash(docker exec backend-dev alembic *)",
+      "Bash(docker exec worker-dev poetry run *)",
+      "Bash(docker exec frontend-dev npx *)",
+      "Bash(docker exec frontend-dev sh -lc *)",
+      "Bash(docker ps *)",
+      "Bash(docker logs *)",
+      "Bash(docker restart *)",
+      "Bash(docker compose ps *)",
+      "Bash(docker compose -f docker-compose.dev.yml ps *)",
+      "Bash(docker compose -f docker-compose.dev.yml logs *)",
+      "Bash(make dev-*)",
+      "Bash(make test-*)",
+      "Bash(make lint-*)",
+      "Bash(make format-*)",
+      "Bash(make migrate-*)",
+      "Bash(make migration-*)",
+      "Bash(make seed-data*)",
+      "Bash(make quickstart*)",
+      "Bash(make urls*)",
+      "Bash(make status*)",
+      "Bash(make health*)",
+      "Bash(make help*)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git switch *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git stash *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "Bash(git remote *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh run list *)",
+      "Bash(gh run view *)",
+      "Bash(terraform fmt *)",
+      "Bash(terraform validate *)",
+      "Bash(curl -sS http://localhost:8000/health)",
+      "Bash(curl http://localhost:8000/health)",
+      "Bash(curl http://localhost:8000/openapi.json)",
+      "Bash(curl http://localhost:5173/src/router/index.ts)"
+    ],
+    "additionalDirectories": [
+      "../backend",
+      "../frontend",
+      "../deployment"
     ]
   }
 }
