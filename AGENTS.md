@@ -44,3 +44,9 @@ nicht im `PATH` — ein blankes `pytest` scheitert mit `No module named pytest`.
 - Kein Prod-Deploy, kein `git push --force`
 - Keine echten OpenStack-Calls in Tests — alles gemockt, sonst baut die
   Suite Ressourcen, die niemand abräumt
+- `.claude/` — erzeugt aus `deployment/harness/`. Was hier geändert wird, ist
+  beim nächsten `make harness-sync` weg. Änderungen gehören in die Quelle.
+
+Geheimnisse, Produktions-Deploys, `terraform apply` und Pushes auf `main` sind
+zusätzlich als deny-Regel in `.claude/settings.json` gesperrt. So ein Kommando
+scheitert ohne Nachfrage — das ist Absicht und kein Werkzeugfehler.
