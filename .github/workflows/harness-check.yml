@@ -1,0 +1,62 @@
+# Prüft, ob die Claude-Harness-Kopien in diesem Repo noch zur Quelle passen.
+#
+# Der Harness liegt kanonisch in Six7-app-store/deployment unter harness/ und
+# wird von dort per `make harness-sync` in dieses Repository kopiert. Ohne
+# diese Prüfung fällt eine von Hand geänderte Kopie erst auf, wenn ein Agent
+# sich hier anders verhält als im Nachbarrepo — und das sucht dann jemand im
+# Code statt in der Konfiguration.
+#
+# Verglichen wird nur, was in allen Repos identisch ist: der Hook-Helfer und
+# die geteilten Skills. Die `settings.json` ist es bewusst nicht — sie trägt
+# je Repo andere Hooks und andere `additionalDirectories`.
+#
+# Die Quelle wird vom gleichnamigen Branch geholt, falls es ihn drüben gibt,
+# sonst von `develop`, sonst vom Standardbranch. Ohne die mittlere Stufe wäre
+# jeder Feature-Branch rot, sobald eine Harness-Änderung zwar in `develop`
+# steht, aber noch nicht im Standardbranch — also genau dann, wenn gerade
+# etwas daran geändert wurde.
+name: CI - Claude-Harness
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: "🪝 Kopien gegen die Quelle"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Quelle holen
+        run: |
+          src=https://github.com/Six7-app-store/deployment
+          ref="${{ github.head_ref || github.ref_name }}"
+          git clone --quiet --depth 1 --branch "$ref" "$src" .harness-src 2>/dev/null \
+            || git clone --quiet --depth 1 --branch develop "$src" .harness-src 2>/dev/null \
+            || git clone --quiet --depth 1 "$src" .harness-src
+          echo "Quelle: $(git -C .harness-src rev-parse --abbrev-ref HEAD) @ $(git -C .harness-src rev-parse --short HEAD)"
+
+      - name: Hook-Helfer vergleichen
+        run: diff -u .harness-src/harness/agent_guard.py .claude/hooks/agent_guard.py
+
+      - name: Geteilte Skills vergleichen
+        run: |
+          for dir in .harness-src/harness/skills/*/; do
+            name=$(basename "$dir")
+            diff -ru "$dir" ".claude/skills/$name"
+          done
+
+      - name: Hinweis bei Abweichung
+        if: failure()
+        run: |
+          echo "::error::Die Harness-Kopien weichen von der Quelle ab."
+          echo "Beheben: im deployment-Repo 'make harness-sync' fahren und die"
+          echo "erzeugten Dateien mitcommitten. Aenderungen gehoeren in"
+          echo "deployment/harness/, nie in eine Kopie."

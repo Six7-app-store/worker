@@ -13,6 +13,14 @@ Drei Modi, alle lesen das Hook-JSON von stdin:
              *.key). Gepflegt wird .env.example, nie .env.
            * Änderungen an bereits existierenden Alembic-Migrationen.
              Neue Migrationen bleiben erlaubt.
+    bash   PreToolUse auf Bash — blockt Kommandos, die eine Datei mit
+           Geheimnissen lesen würden. Die deny-Regeln greifen nur am
+           Read-Werkzeug; eine Shell geht daran vorbei. Entschieden wird
+           am Argument, nie am Kommandostring als Ganzem: eine Suche
+           darin kann ein Kommando nicht von seiner Erwähnung in einer
+           Commit-Nachricht unterscheiden. Aufrufe, die Geheimnisse ohne
+           Dateinamen ausgeben, decken die deny-Regeln ab — die wertet
+           Claude Code selbst aus und kennt Trennzeichen und Quoting.
     lint   PostToolUse auf Edit|Write — formatiert die gerade geänderte
            Datei mit dem Werkzeug des Repos, zu dem sie gehört.
     stop   Stop — Qualitäts-Gate am Ende der Antwort.
@@ -35,6 +43,7 @@ python dagegen zwangsläufig.
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -110,6 +119,12 @@ SECRET_REASON = (
     "Diese Datei traegt Geheimnisse und wird nicht vom Agenten geschrieben. "
     "Gepflegt wird .env.example (ohne Werte); die echte .env und alle "
     "*.pem-/*.key-Dateien setzt eine Person von Hand."
+)
+
+SECRET_COMMAND_REASON = (
+    "Dieses Kommando wuerde eine Datei mit Geheimnissen lesen. Die deny-Regeln "
+    "sperren das Read-Werkzeug, nicht die Shell — deshalb faengt es dieser Hook "
+    "ab. Gepflegt und frei lesbar ist .env.example."
 )
 
 MIGRATION_REASON = (
@@ -269,6 +284,54 @@ def pre(data: dict) -> None:
 
 
 # ----------------------------------------------------------------
+# bash — PreToolUse auf Bash
+# ----------------------------------------------------------------
+# Pfadartige Zeichenketten mit verdaechtiger Endung — auch mitten in einem
+# Argument, etwa in einem python-Einzeiler mit open(...).
+# Bis zum Ende des Dateinamens, sonst beurteilt is_secret_file ein
+# Fragment: aus einer Vorlage mit mehreren Endungen wuerde sonst ein
+# Geheimnis.
+SECRET_PATH = re.compile(r"[\w./\\-]*\.(?:env|pem|key)[\w.-]*")
+
+
+def secret_token(command: str) -> str:
+    """Die erste Stelle im Kommando, die auf eine Geheimnisdatei zeigt.
+
+    Absichtlich am Dateinamen entschieden und nicht am Programm: `cat` zu
+    sperren hilft nichts, solange `head`, `sed`, `awk`, `base64` und ein
+    Dreizeiler in python dasselbe können. Ein Muster über die Leseprogramme
+    ist nicht zu gewinnen, eines über den Dateinamen schon.
+
+    Zwei Durchgänge, weil ein Pfad auf zwei Arten auftaucht: als eigenes
+    Argument und eingebettet in eine Zeichenkette innerhalb des Kommandos.
+
+    Zwei bewusste Kosten. Erstens fängt das auch Kommandos, die gar nichts
+    lesen — wer den Dateinamen nur erwähnt, wird ebenfalls geblockt. Das ist
+    die Richtung, in die ein Fehler bei Geheimnissen fallen soll. Zweitens
+    bleibt ein Pfad unentdeckt, der erst zur Laufzeit entsteht. Dagegen hilft
+    nur, dass Bash ohnehin nachfragt, solange ein Kommando nicht in der
+    allow-Liste steht.
+    """
+    for raw in command.replace("=", " ").split():
+        token = raw.strip("\"'`()<>;|&")
+        if token and is_secret_file(token):
+            return token
+    for treffer in SECRET_PATH.findall(command):
+        if is_secret_file(treffer):
+            return treffer
+    return ""
+
+
+def bash(data: dict) -> None:
+    command = (data.get("tool_input") or {}).get("command") or ""
+    if not command:
+        return
+    token = secret_token(command)
+    if token:
+        deny(f"{SECRET_COMMAND_REASON} Ausloeser: {token}")
+
+
+# ----------------------------------------------------------------
 # lint — PostToolUse
 # ----------------------------------------------------------------
 def container_path(path: str, repo: str, root: str) -> str:
@@ -414,6 +477,8 @@ def main() -> None:
         data = hook_input()
         if mode == "pre":
             pre(data)
+        elif mode == "bash":
+            bash(data)
         elif mode == "lint":
             lint(data)
         elif mode == "stop":

@@ -14,6 +14,17 @@
           }
         ],
         "matcher": "Edit|Write"
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "P=$(command -v python || command -v python3); [ -n \"$P\" ] && \"$P\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent_guard.py\" bash; exit 0",
+            "timeout": 15,
+            "statusMessage": "Secret-Schutz (Shell)"
+          }
+        ],
+        "matcher": "Bash"
       }
     ],
     "PostToolUse": [
@@ -87,7 +98,12 @@
       "Bash(docker exec backend-dev printenv *)",
       "Bash(docker exec worker-dev env *)",
       "Bash(docker exec worker-dev printenv *)",
-      "Bash(docker exec backend-dev alembic downgrade base *)"
+      "Bash(docker exec backend-dev alembic downgrade base *)",
+      "Bash(cat .env)",
+      "Bash(cat *.pem)",
+      "Bash(cat *.key)",
+      "Bash(docker compose config *)",
+      "Bash(docker-compose config *)"
     ],
     "ask": [
       "Bash(git push *)",
