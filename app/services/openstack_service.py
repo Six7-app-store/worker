@@ -1,5 +1,5 @@
 """
-OpenStack service for image management
+OpenStack service for compute-instance operations
 """
 
 import json
@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class OpenStackService:
-    """Service for OpenStack image and compute-instance operations.
+    """Service for OpenStack compute-instance operations.
 
     All methods shell out to the ``openstack`` CLI (python-openstackclient)
     rather than using the SDK in-process, mirroring how the rest of the
-    worker invokes external tooling (Packer, Terraform). Exit-code zero
+    worker invokes external tooling (OpenTofu). Exit-code zero
     is treated as success; stderr is captured and returned to the
     caller for surfacing in the per-deployment log.
 
@@ -59,41 +59,6 @@ class OpenStackService:
             return (-1, "", "OpenStack CLI not found — install python-openstackclient")
         except Exception as e:  # noqa: BLE001 — surfaced to user
             return (-1, "", f"Error running openstack CLI: {e}")
-
-    def check_image_exists(self, image_name: str) -> tuple[bool, str | None]:
-        """
-        Check if an image with the given name already exists in OpenStack
-
-        Args:
-            image_name: Name of the image to check
-
-        Returns:
-            tuple: (exists: bool, image_id: str | None)
-        """
-        if not self.env_vars.get("OS_AUTH_URL"):
-            logger.warning("No OpenStack credentials available for image check")
-            return (False, None)
-
-        rc, stdout, stderr = self._run(
-            ["openstack", "image", "list", "--name", image_name, "-f", "json"],
-            timeout=30,
-        )
-        if rc != 0:
-            logger.error(f"Failed to check image existence: {stderr}")
-            return (False, None)
-
-        try:
-            images = json.loads(stdout)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse OpenStack CLI output: {e}")
-            return (False, None)
-
-        if images:
-            image_id = images[0].get("ID")
-            logger.info(f"Image '{image_name}' already exists with ID: {image_id}")
-            return (True, image_id)
-        logger.info(f"Image '{image_name}' does not exist")
-        return (False, None)
 
     # ------------------------------------------------------------------
     # Compute instance lifecycle (used by pause / resume)

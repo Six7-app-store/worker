@@ -32,8 +32,9 @@ FROM python:3.11-slim AS runtime
 
 # Build arguments für Multi-Platform Support
 ARG TARGETARCH
-ARG TERRAFORM_VERSION=1.16.3
-ARG PACKER_VERSION=1.16.0
+ARG TOFU_VERSION=1.13.1
+ARG TOFU_SHA256_AMD64=8ccbc6f8ee21d2827715f3c6e08a9b3e0209b1e62057c05067ef117e047c1a80
+ARG TOFU_SHA256_ARM64=b9614df40575cc3fc10a8a25025b7245d961da279f715ea3efff4ddae8e6938a
 
 WORKDIR /app
 
@@ -62,23 +63,23 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 # OpenStack CLI installieren
 RUN pip install --no-cache-dir python-openstackclient
 
-# Terraform installieren (platform-aware)
+# OpenTofu installieren (platform-aware). Die SHA256-Summen stammen aus
+# tofu_${TOFU_VERSION}_SHA256SUMS des Releases und sind hier fest verdrahtet,
+# damit ein ausgetauschtes Zip den Build bricht statt durchzurutschen. Bei
+# einem Versionswechsel alle drei ARGs gemeinsam anheben.
 RUN ARCH="${TARGETARCH:-amd64}" && \
-    echo "Installing Terraform ${TERRAFORM_VERSION} for ${ARCH}" && \
-    wget -q https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip && \
-    unzip -qo terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip && \
-    mv terraform /usr/local/bin/ && \
-    rm -f terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip LICENSE.txt && \
-    terraform --version
-
-# Packer installieren (platform-aware)
-RUN ARCH="${TARGETARCH:-amd64}" && \
-    echo "Installing Packer ${PACKER_VERSION} for ${ARCH}" && \
-    wget -q https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip && \
-    unzip -qo packer_${PACKER_VERSION}_linux_${ARCH}.zip && \
-    mv packer /usr/local/bin/ && \
-    rm -f packer_${PACKER_VERSION}_linux_${ARCH}.zip LICENSE.txt && \
-    packer --version
+    case "$ARCH" in \
+      amd64) SHA="$TOFU_SHA256_AMD64" ;; \
+      arm64) SHA="$TOFU_SHA256_ARM64" ;; \
+      *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    echo "Installing OpenTofu ${TOFU_VERSION} for ${ARCH}" && \
+    wget -q https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_${ARCH}.zip && \
+    echo "${SHA}  tofu_${TOFU_VERSION}_linux_${ARCH}.zip" | sha256sum -c - && \
+    unzip -qo tofu_${TOFU_VERSION}_linux_${ARCH}.zip tofu && \
+    mv tofu /usr/local/bin/ && \
+    rm -f tofu_${TOFU_VERSION}_linux_${ARCH}.zip && \
+    tofu version
 
 # Virtual Environment vom Builder kopieren
 COPY --from=builder /app/.venv /app/.venv

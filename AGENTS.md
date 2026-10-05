@@ -1,7 +1,6 @@
 # Worker — Click-n-Deploy App Store
 
-Celery-Worker. Klont App-Repos, baut bei Bedarf Packer-Images und fährt
-Terraform gegen OpenStack. Läuft nur als Service im Stack aus
+Celery-Worker. Klont App-Repos und fährt OpenTofu gegen OpenStack. Läuft nur als Service im Stack aus
 `deployment/docker-compose.dev.yml`.
 
 ## Befehle
@@ -23,11 +22,14 @@ nicht im `PATH` — ein blankes `pytest` scheitert mit `No module named pytest`.
 - Jeder Task holt seine OpenStack-Credentials als eigene `clouds.yaml` aus
   dem vom Backend verschlüsselten Envelope. Credentials nie im Klartext
   loggen und nie zwischen Tasks teilen.
-- Externe Kommandos (git, packer, terraform) laufen über die Executor-Module
+- Externe Kommandos (git, tofu, openstack) laufen über die Executor-Module
   in `app/services/`, nicht per `subprocess` direkt im Task.
-- Packer-Layouts: entweder `packer/template.pkr.hcl` (einzeln) oder
-  `packer/<key>/template.pkr.hcl` (mehrere). Beides gleichzeitig ist ein
-  Fehler und wird bewusst abgelehnt statt geraten — siehe `packer_discovery.py`.
+- App-Vertrag: genau ein `tofu/`-Verzeichnis mit `*.tofu`-Dateien. Packer
+  gibt es nicht mehr; ein Repo mit `packer/` oder `terraform/` wird bewusst
+  abgelehnt statt halb ausgeführt — siehe `_resolve_tofu_dir` in `tasks.py`
+  und ADR 0008.
+- Nicht umbenennen, was OpenTofu selbst so nennt: `terraform { }`-Block,
+  `TF_LOG`, `.terraform/`, `terraform.tfstate`.
 - Tests laufen mit `--timeout=60` und `--timeout-method=thread`. Die Methode
   ist Pflicht: `signal` kann hängende subprocess-Waits nicht unterbrechen,
   und genau die produziert dieser Worker.
@@ -47,6 +49,6 @@ nicht im `PATH` — ein blankes `pytest` scheitert mit `No module named pytest`.
 - `.claude/` — erzeugt aus `deployment/harness/`. Was hier geändert wird, ist
   beim nächsten `make harness-sync` weg. Änderungen gehören in die Quelle.
 
-Geheimnisse, Produktions-Deploys, `terraform apply` und Pushes auf `main` sind
+Geheimnisse, Produktions-Deploys, `tofu apply` und Pushes auf `main` sind
 zusätzlich als deny-Regel in `.claude/settings.json` gesperrt. So ein Kommando
 scheitert ohne Nachfrage — das ist Absicht und kein Werkzeugfehler.

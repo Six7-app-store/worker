@@ -9,16 +9,15 @@ class Settings(BaseSettings):
     # Worker settings
     TEMP_REPO_BASE_PATH: str = "/tmp/worker_repos"
 
-    # Terraform/Packer paths (installed in container)
-    TERRAFORM_PATH: str = "/usr/local/bin/terraform"
-    PACKER_PATH: str = "/usr/local/bin/packer"
+    # OpenTofu binary (installed in container)
+    TOFU_PATH: str = "/usr/local/bin/tofu"
 
     # Symmetric Fernet key shared with the backend. The worker never reaches
     # the database; it receives ciphertext envelopes via Celery and decrypts
     # them in-process with this key.
     CREDENTIAL_ENCRYPTION_KEY: str
 
-    # Terraform remote state — Postgres connection string for the worker-only
+    # OpenTofu remote state — Postgres connection string for the worker-only
     # `postgres-tfstate` container. Empty string means "no remote backend"
     # (legacy local-state behaviour, only useful for unit tests). In production
     # this is always set; an empty value at task time will raise.

@@ -79,7 +79,7 @@ clouds.yaml
 secure.yaml
 
 # -----------------------------------------------------------------------------
-# Terraform / Packer (lokale Testdateien)
+# OpenTofu (lokale Testdateien)
 # -----------------------------------------------------------------------------
 *.tfstate
 *.tfstate.*
@@ -88,14 +88,10 @@ secure.yaml
 *.tfvars
 !*.tfvars.example
 crash.log
-override.tf
-override.tf.json
-*_override.tf
-*_override.tf.json
-
-# Packer
-packer_cache/
-*.pkr.hcl.lock
+override.tofu
+override.tofu.json
+*_override.tofu
+*_override.tofu.json
 
 # -----------------------------------------------------------------------------
 # Worker-spezifisch

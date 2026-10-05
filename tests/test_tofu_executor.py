@@ -1,4 +1,4 @@
-"""Tests for the Terraform executor service."""
+"""Tests for the OpenTofu executor service."""
 
 import os
 import subprocess
@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.services import terraform_executor as te_mod
-from app.services.terraform_executor import TerraformExecutor, _pg_backend_override_hcl, _stream_subprocess
+from app.services import tofu_executor as te_mod
+from app.services.tofu_executor import TofuExecutor, _pg_backend_override_hcl, _stream_subprocess
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,7 +48,7 @@ class FakePopen:
     def wait(self, timeout=None):
         self.wait_called_with = timeout
         if self._raise_timeout:
-            raise subprocess.TimeoutExpired(cmd="terraform", timeout=timeout)
+            raise subprocess.TimeoutExpired(cmd="tofu", timeout=timeout)
         return self._returncode
 
 
@@ -95,11 +95,11 @@ class TestStreamSubprocess:
             seen.append((tool, line))
 
         rc, stdout, stderr = _stream_subprocess(
-            ["terraform", "init"],
+            ["tofu", "init"],
             cwd=str(tmp_path),
             env={"FOO": "bar"},
             timeout=30,
-            tool_name="terraform_init",
+            tool_name="tofu_init",
             output_callback=cb,
         )
 
@@ -107,9 +107,9 @@ class TestStreamSubprocess:
         assert stdout == "hello\nworld\nthird"
         assert stderr == ""
         assert seen == [
-            ("terraform_init", "hello"),
-            ("terraform_init", "world"),
-            ("terraform_init", "third"),
+            ("tofu_init", "hello"),
+            ("tofu_init", "world"),
+            ("tofu_init", "third"),
         ]
         assert fake.wait_called_with == 30
 
@@ -119,11 +119,11 @@ class TestStreamSubprocess:
         mocker.patch.object(te_mod.subprocess, "Popen", return_value=fake)
 
         rc, stdout, stderr = _stream_subprocess(
-            ["terraform", "plan"],
+            ["tofu", "plan"],
             cwd=str(tmp_path),
             env={},
             timeout=5,
-            tool_name="terraform_plan",
+            tool_name="tofu_plan",
             output_callback=None,
         )
         assert rc == 0
@@ -143,11 +143,11 @@ class TestStreamSubprocess:
             raise RuntimeError("boom")
 
         rc, stdout, _ = _stream_subprocess(
-            ["terraform", "init"],
+            ["tofu", "init"],
             cwd=str(tmp_path),
             env={},
             timeout=5,
-            tool_name="terraform_init",
+            tool_name="tofu_init",
             output_callback=cb,
         )
         # The callback was invoked for all three lines even though each raised.
@@ -167,11 +167,11 @@ class TestStreamSubprocess:
         killpg = mocker.patch.object(te_mod.os, "killpg")
 
         rc, stdout, stderr = _stream_subprocess(
-            ["terraform", "apply"],
+            ["tofu", "apply"],
             cwd=str(tmp_path),
             env={},
             timeout=1,
-            tool_name="terraform_apply",
+            tool_name="tofu_apply",
             output_callback=None,
         )
 
@@ -188,11 +188,11 @@ class TestStreamSubprocess:
         mocker.patch.object(te_mod.os, "killpg", side_effect=ProcessLookupError("gone"))
 
         rc, stdout, stderr = _stream_subprocess(
-            ["terraform", "apply"],
+            ["tofu", "apply"],
             cwd=str(tmp_path),
             env={},
             timeout=1,
-            tool_name="terraform_apply",
+            tool_name="tofu_apply",
             output_callback=None,
         )
         assert rc == 124
@@ -201,7 +201,7 @@ class TestStreamSubprocess:
 
 
 # ---------------------------------------------------------------------------
-# TerraformExecutor: _get_env / _write_pg_backend_override
+# TofuExecutor: _get_env / _write_pg_backend_override
 # ---------------------------------------------------------------------------
 
 
@@ -212,58 +212,58 @@ class TestGetEnv:
     def test_env_vars_layered_on_os_environ(self, mocker, tmp_path):
         """env_vars merge on top of os.environ; os.environ keys still present."""
         mocker.patch.dict(os.environ, {"FROM_OS": "yes"}, clear=False)
-        ex = TerraformExecutor(str(tmp_path), env_vars={"CUSTOM": "v"})
+        ex = TofuExecutor(str(tmp_path), env_vars={"CUSTOM": "v"})
         env = ex._get_env()
         assert env["FROM_OS"] == "yes"
         assert env["CUSTOM"] == "v"
 
     def test_extra_env_wins_over_env_vars(self, mocker, tmp_path):
         """extra_env passed to _get_env overrides instance env_vars."""
-        ex = TerraformExecutor(str(tmp_path), env_vars={"K": "instance"})
+        ex = TofuExecutor(str(tmp_path), env_vars={"K": "instance"})
         env = ex._get_env(extra_env={"K": "extra"})
         assert env["K"] == "extra"
 
     def test_tf_log_set_when_worker_tf_log_present(self, mocker, tmp_path):
-        """TF_LOG is propagated from WORKER_TF_LOG when set."""
-        mocker.patch.dict(os.environ, {"WORKER_TF_LOG": "TRACE"}, clear=False)
-        ex = TerraformExecutor(str(tmp_path))
+        """TF_LOG is propagated from WORKER_TOFU_LOG when set."""
+        mocker.patch.dict(os.environ, {"WORKER_TOFU_LOG": "TRACE"}, clear=False)
+        ex = TofuExecutor(str(tmp_path))
         env = ex._get_env()
         assert env["TF_LOG"] == "TRACE"
 
     def test_tf_log_popped_when_worker_tf_log_absent(self, mocker, tmp_path):
-        """TF_LOG is stripped from env if WORKER_TF_LOG is unset, even when inherited."""
-        # Ensure WORKER_TF_LOG is absent and TF_LOG inherited from os.environ.
-        env_copy = {k: v for k, v in os.environ.items() if k != "WORKER_TF_LOG"}
+        """TF_LOG is stripped from env if WORKER_TOFU_LOG is unset, even when inherited."""
+        # Ensure WORKER_TOFU_LOG is absent and TF_LOG inherited from os.environ.
+        env_copy = {k: v for k, v in os.environ.items() if k != "WORKER_TOFU_LOG"}
         env_copy["TF_LOG"] = "DEBUG"
         mocker.patch.dict(os.environ, env_copy, clear=True)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         env = ex._get_env()
         assert "TF_LOG" not in env
 
     def test_pg_conn_str_added_only_when_backend_conn_set(self, tmp_path):
         """PG_CONN_STR is injected only when backend_conn_str is configured."""
-        ex_with = TerraformExecutor(str(tmp_path), backend_conn_str="postgres://x")
+        ex_with = TofuExecutor(str(tmp_path), backend_conn_str="postgres://x")
         assert ex_with._get_env()["PG_CONN_STR"] == "postgres://x"
 
-        ex_without = TerraformExecutor(str(tmp_path))
+        ex_without = TofuExecutor(str(tmp_path))
         assert "PG_CONN_STR" not in ex_without._get_env()
 
 
 @pytest.mark.unit
 class TestWritePgBackendOverride:
-    """Verify pg_backend_override.tf is written only when schema_name is configured."""
+    """Verify pg_backend_override.tofu is written only when schema_name is configured."""
 
     def test_noop_without_schema(self, tmp_path):
         """No file is written when backend_schema_name is None."""
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ex._write_pg_backend_override()
-        assert not (tmp_path / "pg_backend_override.tf").exists()
+        assert not (tmp_path / "pg_backend_override.tofu").exists()
 
     def test_writes_override_with_schema(self, tmp_path):
         """Override file is written and contains the rendered HCL for the schema."""
-        ex = TerraformExecutor(str(tmp_path), backend_schema_name="deploy_xyz")
+        ex = TofuExecutor(str(tmp_path), backend_schema_name="deploy_xyz")
         ex._write_pg_backend_override()
-        override = tmp_path / "pg_backend_override.tf"
+        override = tmp_path / "pg_backend_override.tofu"
         assert override.exists()
         text = override.read_text()
         assert 'schema_name = "deploy_xyz"' in text
@@ -271,12 +271,12 @@ class TestWritePgBackendOverride:
 
 
 # ---------------------------------------------------------------------------
-# TerraformExecutor: init/plan/apply/destroy (mock _stream_subprocess)
+# TofuExecutor: init/plan/apply/destroy (mock _stream_subprocess)
 # ---------------------------------------------------------------------------
 
 
 def _patch_stream(mocker, returncode=0, stdout="ok", stderr=""):
-    """Patch the module-level _stream_subprocess used by TerraformExecutor."""
+    """Patch the module-level _stream_subprocess used by TofuExecutor."""
     return mocker.patch.object(
         te_mod,
         "_stream_subprocess",
@@ -286,12 +286,12 @@ def _patch_stream(mocker, returncode=0, stdout="ok", stderr=""):
 
 @pytest.mark.unit
 class TestInit:
-    """Verify terraform init command shape and success/failure handling."""
+    """Verify tofu init command shape and success/failure handling."""
 
     def test_init_without_schema_omits_reconfigure(self, mocker, tmp_path):
         """When no schema is configured, -reconfigure is not added and no override file is written."""
         stream = _patch_stream(mocker, returncode=0, stdout="initialized")
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
 
         ok, stdout, stderr = ex.init()
 
@@ -299,28 +299,28 @@ class TestInit:
         assert stdout == "initialized"
         assert stderr == ""
         cmd = stream.call_args.args[0]
-        assert cmd[-3:] == [ex.terraform_path, "init", "-input=false"] or (cmd[1:] == ["init", "-input=false"])
+        assert cmd[-3:] == [ex.tofu_path, "init", "-input=false"] or (cmd[1:] == ["init", "-input=false"])
         assert "-reconfigure" not in cmd
         assert stream.call_args.kwargs["timeout"] == 300
-        assert stream.call_args.kwargs["tool_name"] == "terraform_init"
-        assert not (tmp_path / "pg_backend_override.tf").exists()
+        assert stream.call_args.kwargs["tool_name"] == "tofu_init"
+        assert not (tmp_path / "pg_backend_override.tofu").exists()
 
     def test_init_with_schema_appends_reconfigure_and_writes_override(self, mocker, tmp_path):
         """With backend_schema_name, init adds -reconfigure and writes the override file."""
         _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(
+        ex = TofuExecutor(
             str(tmp_path),
             backend_conn_str="postgres://x",
             backend_schema_name="deploy_s",
         )
         ok, _, _ = ex.init()
         assert ok is True
-        assert (tmp_path / "pg_backend_override.tf").exists()
+        assert (tmp_path / "pg_backend_override.tofu").exists()
 
     def test_init_failure_returns_false(self, mocker, tmp_path):
         """Non-zero return from the stream surfaces as success=False."""
         _patch_stream(mocker, returncode=1, stdout="err", stderr="")
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, stdout, _ = ex.init()
         assert ok is False
         assert stdout == "err"
@@ -328,7 +328,7 @@ class TestInit:
     def test_init_exception_caught_returns_false(self, mocker, tmp_path):
         """An exception inside the init body returns (False, "", str(e))."""
         mocker.patch.object(te_mod, "_stream_subprocess", side_effect=RuntimeError("boom"))
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, stdout, stderr = ex.init()
         assert ok is False
         assert stdout == ""
@@ -337,25 +337,25 @@ class TestInit:
 
 @pytest.mark.unit
 class TestPlan:
-    """Verify terraform plan command shape."""
+    """Verify tofu plan command shape."""
 
     def test_plan_basic(self, mocker, tmp_path):
         """plan with no args uses the bare command and a 300s timeout."""
         stream = _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, _, _ = ex.plan()
         assert ok is True
         cmd = stream.call_args.args[0]
         # ``-lock=false``: per-Deployment-Schema isoliert den State, das
         # geteilte pg-Lock würde sonst unzusammenhängende Deployments
-        # serialisieren (siehe TerraformExecutor.plan).
-        assert cmd == [ex.terraform_path, "plan", "-input=false", "-lock=false"]
+        # serialisieren (siehe TofuExecutor.plan).
+        assert cmd == [ex.tofu_path, "plan", "-input=false", "-lock=false"]
         assert stream.call_args.kwargs["timeout"] == 300
 
     def test_plan_with_var_file_and_variables(self, mocker, tmp_path):
         """plan with var_file appends -var-file and one -var pair per variable."""
         stream = _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ex.plan(var_file="vars.tfvars", variables={"a": "1", "b": "2"})
         cmd = stream.call_args.args[0]
         assert "-var-file" in cmd
@@ -368,14 +368,14 @@ class TestPlan:
     def test_plan_failure(self, mocker, tmp_path):
         """plan non-zero returncode surfaces as success=False."""
         _patch_stream(mocker, returncode=2)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, _, _ = ex.plan()
         assert ok is False
 
     def test_plan_exception_returns_false(self, mocker, tmp_path):
         """An exception in plan returns (False, "", message)."""
         mocker.patch.object(te_mod, "_stream_subprocess", side_effect=ValueError("bad"))
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, stdout, stderr = ex.plan()
         assert ok is False
         assert stdout == ""
@@ -384,22 +384,22 @@ class TestPlan:
 
 @pytest.mark.unit
 class TestApply:
-    """Verify terraform apply command shape including targets and replaces."""
+    """Verify tofu apply command shape including targets and replaces."""
 
     def test_apply_basic(self, mocker, tmp_path):
         """apply with no args uses the bare command and a 1800s timeout."""
         stream = _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, _, _ = ex.apply()
         assert ok is True
         cmd = stream.call_args.args[0]
-        assert cmd == [ex.terraform_path, "apply", "-auto-approve", "-input=false", "-lock=false"]
+        assert cmd == [ex.tofu_path, "apply", "-auto-approve", "-input=false", "-lock=false"]
         assert stream.call_args.kwargs["timeout"] == 1800
 
     def test_apply_with_targets_and_replaces(self, mocker, tmp_path):
         """apply propagates -var-file, -var, -target, -replace flags as separate args."""
         stream = _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ex.apply(
             var_file="vars.tfvars",
             variables={"k": "v"},
@@ -421,14 +421,14 @@ class TestApply:
     def test_apply_failure(self, mocker, tmp_path):
         """Non-zero apply rc surfaces as success=False."""
         _patch_stream(mocker, returncode=1)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, _, _ = ex.apply()
         assert ok is False
 
     def test_apply_exception(self, mocker, tmp_path):
         """An exception in apply returns (False, "", message)."""
         mocker.patch.object(te_mod, "_stream_subprocess", side_effect=RuntimeError("kapow"))
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, stdout, stderr = ex.apply()
         assert ok is False
         assert stdout == ""
@@ -437,22 +437,22 @@ class TestApply:
 
 @pytest.mark.unit
 class TestDestroy:
-    """Verify terraform destroy command shape."""
+    """Verify tofu destroy command shape."""
 
     def test_destroy_basic(self, mocker, tmp_path):
         """destroy without args uses bare command with 1800s timeout."""
         stream = _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, _, _ = ex.destroy()
         assert ok is True
         cmd = stream.call_args.args[0]
-        assert cmd == [ex.terraform_path, "destroy", "-auto-approve", "-input=false", "-lock=false"]
+        assert cmd == [ex.tofu_path, "destroy", "-auto-approve", "-input=false", "-lock=false"]
         assert stream.call_args.kwargs["timeout"] == 1800
 
     def test_destroy_with_var_file_and_variables(self, mocker, tmp_path):
         """destroy adds -var-file and -var pairs."""
         stream = _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ex.destroy(var_file="vars.tfvars", variables={"x": "9"})
         cmd = stream.call_args.args[0]
         assert "-var-file" in cmd and "vars.tfvars" in cmd
@@ -461,14 +461,14 @@ class TestDestroy:
     def test_destroy_failure(self, mocker, tmp_path):
         """destroy non-zero rc surfaces as success=False."""
         _patch_stream(mocker, returncode=1)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, _, _ = ex.destroy()
         assert ok is False
 
     def test_destroy_exception(self, mocker, tmp_path):
         """An exception in destroy returns (False, "", message)."""
         mocker.patch.object(te_mod, "_stream_subprocess", side_effect=OSError("io"))
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         ok, stdout, stderr = ex.destroy()
         assert ok is False
         assert stdout == ""
@@ -476,72 +476,72 @@ class TestDestroy:
 
 
 # ---------------------------------------------------------------------------
-# TerraformExecutor: output / state_pull (mock subprocess.run)
+# TofuExecutor: output / state_pull (mock subprocess.run)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 class TestOutput:
-    """Verify terraform output JSON parsing and failure handling."""
+    """Verify tofu output JSON parsing and failure handling."""
 
     def test_output_success_returns_parsed_dict(self, mocker, tmp_path):
         """output() parses JSON stdout into a dict on success."""
         fake_result = MagicMock(returncode=0, stdout='{"ip": {"value": "1.2.3.4"}}', stderr="")
         run = mocker.patch.object(te_mod.subprocess, "run", return_value=fake_result)
 
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         result = ex.output()
 
         assert result == {"ip": {"value": "1.2.3.4"}}
         cmd = run.call_args.args[0]
-        assert cmd == [ex.terraform_path, "output", "-json"]
+        assert cmd == [ex.tofu_path, "output", "-json"]
 
     def test_output_nonzero_returncode_returns_none(self, mocker, tmp_path):
-        """output() returns None when terraform exits non-zero."""
+        """output() returns None when tofu exits non-zero."""
         fake_result = MagicMock(returncode=1, stdout="", stderr="oops")
         mocker.patch.object(te_mod.subprocess, "run", return_value=fake_result)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         assert ex.output() is None
 
     def test_output_invalid_json_returns_none(self, mocker, tmp_path):
         """output() returns None when stdout is not valid JSON."""
         fake_result = MagicMock(returncode=0, stdout="not json", stderr="")
         mocker.patch.object(te_mod.subprocess, "run", return_value=fake_result)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         assert ex.output() is None
 
     def test_output_subprocess_raises_returns_none(self, mocker, tmp_path):
         """output() returns None when subprocess.run raises."""
         mocker.patch.object(te_mod.subprocess, "run", side_effect=RuntimeError("boom"))
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         assert ex.output() is None
 
 
 @pytest.mark.unit
 class TestStatePull:
-    """Verify terraform state pull return semantics."""
+    """Verify tofu state pull return semantics."""
 
     def test_state_pull_success_returns_stdout_verbatim(self, mocker, tmp_path):
         """state_pull() returns stdout verbatim on rc=0."""
         fake_result = MagicMock(returncode=0, stdout='{"version":4}', stderr="")
         run = mocker.patch.object(te_mod.subprocess, "run", return_value=fake_result)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         out = ex.state_pull()
         assert out == '{"version":4}'
         cmd = run.call_args.args[0]
-        assert cmd == [ex.terraform_path, "state", "pull"]
+        assert cmd == [ex.tofu_path, "state", "pull"]
 
     def test_state_pull_nonzero_returns_none(self, mocker, tmp_path):
         """state_pull() returns None on non-zero return code."""
         fake_result = MagicMock(returncode=1, stdout="ignored", stderr="bad")
         mocker.patch.object(te_mod.subprocess, "run", return_value=fake_result)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         assert ex.state_pull() is None
 
     def test_state_pull_exception_returns_none(self, mocker, tmp_path):
         """state_pull() returns None when subprocess.run raises."""
         mocker.patch.object(te_mod.subprocess, "run", side_effect=OSError("nope"))
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
         assert ex.state_pull() is None
 
 
@@ -552,7 +552,7 @@ class TestDestroyRefreshFlag:
     def test_destroy_without_refresh_adds_the_flag(self, mocker, tmp_path):
         """refresh=False is the documented way past a resource deleted out-of-band."""
         stream = _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
 
         ok, _, _ = ex.destroy(refresh=False)
 
@@ -562,7 +562,7 @@ class TestDestroyRefreshFlag:
     def test_destroy_with_refresh_omits_the_flag(self, mocker, tmp_path):
         """The default stays a refreshing destroy - the flag must not leak in."""
         stream = _patch_stream(mocker, returncode=0)
-        ex = TerraformExecutor(str(tmp_path))
+        ex = TofuExecutor(str(tmp_path))
 
         ex.destroy(refresh=True)
 
@@ -597,11 +597,11 @@ class TestDrainSurvivesABrokenPipe:
         mocker.patch.object(te_mod.subprocess, "Popen", return_value=fake)
 
         rc, stdout, stderr = _stream_subprocess(
-            ["terraform", "apply"],
+            ["tofu", "apply"],
             cwd=str(tmp_path),
             env={},
             timeout=5,
-            tool_name="terraform_apply",
+            tool_name="tofu_apply",
             output_callback=None,
         )
 
