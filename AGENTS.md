@@ -27,7 +27,7 @@ nicht im `PATH` — ein blankes `pytest` scheitert mit `No module named pytest`.
 - App-Vertrag: genau ein `tofu/`-Verzeichnis mit `*.tofu`-Dateien. Packer
   gibt es nicht mehr; ein Repo mit `packer/` oder `terraform/` wird bewusst
   abgelehnt statt halb ausgeführt — siehe `_resolve_tofu_dir` in `tasks.py`
-  und ADR 0008.
+  und ADR 0010.
 - Nicht umbenennen, was OpenTofu selbst so nennt: `terraform { }`-Block,
   `TF_LOG`, `.terraform/`, `terraform.tfstate`.
 - Tests laufen mit `--timeout=60` und `--timeout-method=thread`. Die Methode

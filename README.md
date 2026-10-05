@@ -43,7 +43,7 @@ Tests, Lint und Format laufen im Worker-Container — `make shell-worker` öffne
 Der Worker erwartet im App-Repo genau ein Verzeichnis `tofu/` mit `*.tofu`-Dateien.
 Ein Repo, das noch `packer/` oder `terraform/` mitbringt, lehnt er mit einer
 Fehlermeldung ab, die den nötigen Umbau nennt (`_resolve_tofu_dir` in `tasks.py`).
-Hintergrund: ADR 0008 im deployment-Repo.
+Hintergrund: ADR 0010 im deployment-Repo.
 
 ## Code-Struktur
 
