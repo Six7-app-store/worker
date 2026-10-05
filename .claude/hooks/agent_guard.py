@@ -106,7 +106,8 @@ REPOS = {
             )
         ],
     },
-    # deployment läuft nicht im Container: das Gate ist Terraform am Host.
+    # deployment läuft nicht im Container: das Gate ist OpenTofu (und für
+    # die Übergangsinsel infrastructure/terraform noch Terraform) am Host.
     "deployment": {
         "container": None,
         "format": [],
@@ -345,6 +346,29 @@ def container_path(path: str, repo: str, root: str) -> str:
     return "/app/" + relative
 
 
+# Welcher IaC-Baum mit welchem Werkzeug gepflegt wird. infrastructure/tofu
+# ist OpenTofu (ADR 0010); infrastructure/terraform hält nur noch envs/moodle
+# und envs/forgejo und fällt weg, sobald die beiden umgezogen sind.
+IAC_TREES = (
+    ("tofu", "tofu"),
+    ("terraform", "terraform"),
+)
+
+
+def iac_formatter(path: str):
+    """Das fmt-Kommando für eine IaC-Datei, sonst None.
+
+    Die Endung entscheidet: Terraform liest keine .tofu-Dateien, und eine
+    .tf-Datei liegt nur noch in der Terraform-Übergangsinsel.
+    """
+    posix = as_posix(path)
+    if posix.endswith(".tofu"):
+        return ["tofu", "fmt", path]
+    if posix.endswith((".tf", ".tfvars")):
+        return ["terraform", "fmt", path]
+    return None
+
+
 def lint(data: dict) -> None:
     cwd, root = session_dirs(data)
     path = resolve(edited_path(data), cwd)
@@ -352,10 +376,11 @@ def lint(data: dict) -> None:
     if not repo:
         return
 
-    # Terraform formatiert der Host, nicht ein Container.
-    if as_posix(path).endswith((".tf", ".tfvars")):
+    # IaC formatiert der Host, nicht ein Container.
+    formatter = iac_formatter(path)
+    if formatter:
         with contextlib.suppress(Exception):
-            subprocess.run(["terraform", "fmt", path], capture_output=True, timeout=30)
+            subprocess.run(formatter, capture_output=True, timeout=30)
         return
 
     config = REPOS[repo]
@@ -399,19 +424,21 @@ def gate_repo(repo: str, repo_dir: str) -> list:
     reasons = []
 
     if repo == "deployment":
-        terraform_dir = os.path.join(repo_dir, "infrastructure", "terraform")
-        if os.path.isdir(terraform_dir):
+        for tree, tool in IAC_TREES:
+            tree_dir = os.path.join(repo_dir, "infrastructure", tree)
+            if not os.path.isdir(tree_dir):
+                continue
             try:
                 result = subprocess.run(
-                    ["terraform", "fmt", "-check", "-recursive", terraform_dir],
+                    [tool, "fmt", "-check", "-recursive", tree_dir],
                     capture_output=True,
                     timeout=60,
                 )
                 if result.returncode != 0:
                     reasons.append(
-                        "Terraform ist nicht formatiert. Die Pipeline bricht darauf "
-                        "ab. Beheben: terraform fmt -recursive "
-                        "infrastructure/terraform"
+                        f"infrastructure/{tree} ist nicht formatiert. Die Pipeline "
+                        f"bricht darauf ab. Beheben: {tool} fmt -recursive "
+                        f"infrastructure/{tree}"
                     )
             except Exception:
                 pass

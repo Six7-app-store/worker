@@ -5,131 +5,28 @@
 # revisit when the upstream advisory changes.
 
 # AVD-DS-0002: Dockerfile/Dockerfile.dev run as root.
-# The worker invokes terraform / packer / openstack CLI against
-# bind-mounted git repos. Switching to non-root requires verifying
-# that all three toolchains can write into /tmp/worker_repos and
-# .terraform plugin caches without permission issues — and that
-# bind-mount UIDs line up on macOS + Linux. Tracked in #16.
+# The worker invokes the tofu / openstack CLI against bind-mounted
+# git repos. Switching to non-root requires verifying that both
+# toolchains can write into /tmp/worker_repos and the .terraform
+# plugin cache (OpenTofu kept that directory name) without permission
+# issues — and that bind-mount UIDs line up on macOS + Linux. Tracked
+# in #16.
 AVD-DS-0002
 
-# Packer upstream CVE backlog — Packer's latest release (v1.16.0)
-# still ships outdated modules. Nothing to fix on our side; we bump
-# PACKER_VERSION when HashiCorp ships a release that clears these.
-# Tracked in #18.
+# OpenTofu upstream CVE backlog. Gemessen am Produktions-Image mit
+# OpenTofu v1.13.1 (neuestes Release, 01.10.2026); Trivy meldet am
+# tofu-Binary genau diese drei HIGH-Befunde. Kein veröffentlichter Build
+# behebt sie. Beim nächsten TOFU_VERSION-Sprung neu scannen und alles
+# streichen, was dann sauber ist — nicht mitschleppen.
 #
-# Go stdlib (fixed in 1.25.10):
-CVE-2026-33811
-CVE-2026-33814
-CVE-2026-39820
-CVE-2026-39823
-CVE-2026-39825
-CVE-2026-39826
-CVE-2026-39836
-CVE-2026-42499
-# Go stdlib (fixed in 1.25.11 / 1.26.4) — also covers terraform's
-# stdlib hit on Go 1.25.10, see Terraform block below:
-CVE-2026-27145
-# Go modules pulled in by Packer:
-CVE-2026-46680
-CVE-2026-44973
-CVE-2026-45022
-# containerd/v2 vendored in Packer (fixed in 2.0.10/2.1.9/2.2.5/2.3.2):
-CVE-2026-53488
-CVE-2026-53489
-CVE-2026-53492
-
-# Terraform upstream CVE backlog — entries here wait on a HashiCorp
-# rebuild. Terraform now runs v1.16.3; anything below that a newer
-# release clears should be deleted rather than carried along.
-#
-# Go stdlib (fixed in 1.25.11 / 1.26.4):
-CVE-2026-42504
-# Go stdlib os.Root symlink-following / directory-traversal (fixed in
-# 1.25.12 / 1.26.5 / 1.27.0-rc.2). Hits both Packer and Terraform
-# binaries; suppressed until HashiCorp rebuilds against Go 1.25.12+.
-CVE-2026-39822
-
-# Go modules vendored into Packer and/or Terraform — fixed upstream but
-# only available after HashiCorp ships a rebuild. Same backlog story
-# as the stdlib entries above.
-#
-# golang.org/x/crypto (fixed in 0.52.0):
-CVE-2026-39827
-CVE-2026-39828
-CVE-2026-39829
-CVE-2026-39830
-# CVE-2026-39831: golang.org/x/crypto/ssh security-key bypass (missing
-# user-presence check). Vendored into Packer; fixed upstream in 0.52.0,
-# available once HashiCorp rebuilds. Nothing to fix on our side.
-CVE-2026-39831
-CVE-2026-39832
-CVE-2026-39835
-CVE-2026-42508
-CVE-2026-46595
-CVE-2026-46597
-# golang.org/x/net (fixed in 0.55.0):
-CVE-2026-25680
-CVE-2026-25681
-CVE-2026-27136
-CVE-2026-39821
-CVE-2026-42502
-CVE-2026-42506
-
-# google.golang.org/grpc (fixed in 1.82.1): gRPC-Go xDS RBAC / HTTP/2
-# advisory. Vendored into Packer and Terraform; available once HashiCorp
-# rebuilds against the patched grpc. Nothing to fix on our side.
-GHSA-hrxh-6v49-42gf
-
-# ---------------------------------------------------------------------------
-# Second round of the same backlog, added 2026-09-05.
-#
-# Checked before suppressing: Terraform 1.15.5 -> 1.15.9 moves Go 1.25.9 to
-# 1.25.10, and 1.16.1 to 1.26.4; Packer 1.15.3 -> 1.16.0 moves it to 1.26.3.
-# These advisories need Go 1.25.13 / 1.26.6, so no released build clears them.
-# Raising the versions is worth doing on its own merits — Terraform runs the
-# App templates, so it belongs in a change we can verify — but it would not
-# make these entries unnecessary.
-#
-# Go stdlib (fixed in 1.25.13 / 1.26.6 / 1.27.0-rc.3):
-CVE-2026-33818
-CVE-2026-56853
-CVE-2026-56858
-CVE-2026-56859
-CVE-2026-56860
-CVE-2026-56862
-# golang.org/x/net (fixed in 0.56.0), x/text (0.39.0), x/mod (0.40.0):
-CVE-2026-46600
-CVE-2026-56852
+# golang.org/x/mod sumdb (fixed in 0.40.0): Integritätsprüfung gegen eine
+# bösartige GOSUMDB. tofu lädt Provider über das Registry-Protokoll mit
+# eigenen Checksummen (.terraform.lock.hcl), nicht über die Go-sumdb.
 CVE-2026-56864
 CVE-2026-56865
-# google.golang.org/grpc (fixed in 1.83.1):
-CVE-2026-84304
-# CVE-2026-84445 — gRPC-Go denial of service via malformed RPC requests,
-# fixed in grpc 1.82.2 / 1.83.2.
-#
-# Der Versionssprung löst das nur zur Hälfte, nachgemessen an den
-# Binaries selbst (google.golang.org/grpc aus der Go-Build-Info):
-#
-#   terraform 1.15.5 -> v1.80.0   |   1.16.3 -> v1.83.2   behoben
-#   packer    1.15.3 -> v1.79.3   |   1.16.0 -> v1.82.1   weiterhin offen
-#
-# Packer 1.16.0 ist die neueste Veröffentlichung und liegt genau eine
-# Patch-Version unter dem Fix. Es gibt also keinen Build, der das klärt.
-#
-# Warum das hier vertretbar ist: Packer und Terraform benutzen gRPC
-# ausschließlich zur Verständigung mit ihren eigenen Plugins, über einen
-# lokalen Socket im selben Container. Ein Angreifer müsste bereits in
-# diesem Container Code ausführen, um die fehlerhaften Anfragen
-# abzusetzen — dann ist der Denial of Service das kleinere Problem.
-# Nichts davon ist von außen erreichbar.
-#
-# Entfernen, sobald Packer > 1.16.0 mit grpc >= 1.82.2 erscheint.
+# google.golang.org/grpc (fixed in 1.82.2 / 1.83.2), tofu bringt v1.83.1
+# mit: Denial of Service über fehlerhafte RPC-Anfragen. tofu spricht gRPC
+# nur mit den eigenen Provider-Plugins über einen lokalen Socket im
+# selben Container. Wer die Anfragen absetzen kann, führt dort schon Code
+# aus — dann ist der Denial of Service das kleinere Problem.
 CVE-2026-84445
-# go-git, vendored into Packer (fixed in 5.19.2):
-CVE-2026-71556
-# CVE-2026-56854 is the one CRITICAL here: golang.org/x/crypto/ssh fails to
-# enforce source-address restrictions from authorized_keys. That is a server
-# side check, and both binaries use SSH only as a client — Packer to reach the
-# machine it provisions, Terraform in its ssh provisioner. Revisit if either
-# ever runs an SSH server.
-CVE-2026-56854

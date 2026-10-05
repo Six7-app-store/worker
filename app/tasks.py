@@ -7,22 +7,14 @@ import git
 
 from .celery_app import celery_app
 from .config import settings
-from .services import (
-    OpenStackService,
-    PackerBuildLock,
-    PackerExecutor,
-    PerTaskCloudsConfig,
-    TerraformExecutor,
-    git_service,
-)
-from .services.packer_discovery import PackerTemplateDiscoveryError, _discover_packer_templates, _PackerTemplate
+from .services import OpenStackService, PerTaskCloudsConfig, TofuExecutor, git_service
 from .utils.logger import LogCategory, get_logger
 
 logger = get_logger(__name__)
 
 
 def _tfstate_schema_name(deployment_id: str) -> str:
-    """Postgres schema name for one deployment's Terraform state.
+    """Postgres schema name for one deployment's OpenTofu state.
 
     UUIDs contain hyphens, which would force every reference to be
     double-quoted. Replacing hyphens with underscores keeps the schema
@@ -51,13 +43,13 @@ class Failure(Exception):
         logs_dict: list[dict[str, Any]] | dict[str, Any],
         tf_state: str | None = None,
         commit_info: dict[str, Any] | None = None,
-        terraform_outputs: dict[str, Any] | None = None,
+        tofu_outputs: dict[str, Any] | None = None,
     ):
         self.deployment_id = deployment_id
         self.logs_dict = logs_dict
         self.tf_state = tf_state
         self.commit_info = commit_info
-        self.terraform_outputs = terraform_outputs
+        self.tofu_outputs = tofu_outputs
 
         # Encode all data as JSON in the exception message
         data = {
@@ -66,7 +58,7 @@ class Failure(Exception):
             "logs": logs_dict,
             "tf_state": tf_state,
             "commit_info": commit_info,
-            "terraform_outputs": terraform_outputs,
+            "tofu_outputs": tofu_outputs,
         }
         super().__init__(json.dumps(data))
 
@@ -82,7 +74,7 @@ class Failure(Exception):
         instance.logs_dict = data.get("logs")
         instance.tf_state = data.get("tf_state")
         instance.commit_info = data.get("commit_info")
-        instance.terraform_outputs = data.get("terraform_outputs")
+        instance.tofu_outputs = data.get("tofu_outputs")
         Exception.__init__(instance, payload)
         return instance
 
@@ -101,7 +93,7 @@ class Failure(Exception):
         return json.loads(str(self))
 
 
-# --- Variable encoding for Packer/Terraform CLI ----------------------------
+# --- Variable encoding for the OpenTofu CLI --------------------------------
 
 
 def _looks_like_file_var_value(value: Any) -> bool:
@@ -113,7 +105,7 @@ def _looks_like_file_var_value(value: Any) -> bool:
 
     Used by :func:`_strip_file_vars` so destroy / cleanup-after-
     failure can drop ``@openstack:file:*``-marked variables before
-    passing the var-set to ``terraform destroy``. Terraform
+    passing the var-set to ``tofu destroy``. OpenTofu
     validates *all* declared variables on every command — including
     destroy — so an apply-only file-var would otherwise block the
     cleanup with a schema error.
@@ -132,21 +124,21 @@ def _looks_like_file_var_value(value: Any) -> bool:
     return True
 
 
-def _strip_file_vars(terraform_vars: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``terraform_vars`` with file-shape entries removed.
+def _strip_file_vars(tofu_vars: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``tofu_vars`` with file-shape entries removed.
 
     Pure function — never mutates the input. Used by destroy and the
     deploy cleanup-after-failure branches; deploy itself keeps the
     file vars because ``apply`` consumes them via cloud-init.
     """
-    return {k: v for k, v in terraform_vars.items() if not _looks_like_file_var_value(v)}
+    return {k: v for k, v in tofu_vars.items() if not _looks_like_file_var_value(v)}
 
 
 def _scrub_nested_nones(value: Any) -> Any:
     """Recursively drop ``None`` entries from nested dicts/lists.
 
     A stray ``None`` inside a ``map(list(string))`` slot would surface as
-    literal HCL ``null`` after the JSON round-trip and trip Terraform's
+    literal HCL ``null`` after the JSON round-trip and trip OpenTofu's
     type check. Dicts have their ``None``-valued keys removed, lists have
     their ``None`` entries filtered out, and both are walked recursively.
     Scalars (including bools) pass through untouched.
@@ -163,17 +155,17 @@ def _scrub_nested_nones(value: Any) -> Any:
     return value
 
 
-def encode_terraform_vars(d: dict[str, Any]) -> dict[str, str]:
-    """Encode variables for ``terraform -var key=value`` CLI args.
+def encode_tofu_vars(d: dict[str, Any]) -> dict[str, str]:
+    """Encode variables for ``tofu -var key=value`` CLI args.
 
-    Terraform reads complex types (objects, tuples) when the value is a
+    OpenTofu reads complex types (objects, tuples) when the value is a
     valid JSON literal. We JSON-encode dicts/lists once and pass them
     through verbatim — no string normalisation that could damage escape
     sequences.
 
     Nested ``None`` values are scrubbed recursively (see
     :func:`_scrub_nested_nones`) so a stray ``null`` deep inside a
-    ``map(list(string))`` slot can't trip Terraform's type check.
+    ``map(list(string))`` slot can't trip OpenTofu's type check.
     """
     result: dict[str, str] = {}
     for k, v in d.items():
@@ -189,132 +181,39 @@ def encode_terraform_vars(d: dict[str, Any]) -> dict[str, str]:
     return result
 
 
-def encode_packer_vars(d: dict[str, Any]) -> dict[str, str]:
-    """Encode variables for ``packer -var key=value`` CLI args.
-
-    For HCL ``list(...)``-typed variables, we emit a JSON array literal
-    (e.g. ``["NAT"]``) — that's the only form Packer accepts via ``-var``
-    for typed-list variables, since Packer parses each ``-var`` value as
-    an HCL expression against the declared type. JSON arrays are valid
-    HCL list literals, so a single representation covers both syntaxes.
-    String values are passed through verbatim.
-    """
-    result: dict[str, str] = {}
-    for k, v in d.items():
-        if v is None:
-            continue
-        if isinstance(v, list):
-            # JSON array works for ``list(string)``, ``list(number)`` etc.
-            # ``ensure_ascii=False`` lets non-ASCII names pass through
-            # unchanged (Packer's HCL parser is UTF-8 native).
-            result[k] = json.dumps(v, ensure_ascii=False)
-        elif isinstance(v, dict):
-            # ``map(...)``-typed Packer vars take the same JSON literal
-            # path. No Packer template in the project uses this today,
-            # but the encoding is correct for when one shows up.
-            result[k] = json.dumps(v, ensure_ascii=False)
-        elif isinstance(v, bool):
-            result[k] = "true" if v else "false"
-        else:
-            result[k] = str(v)
-    return result
-
-
 # --- Phase tracking ----------------------------------------------------------
 #
 # Phases are pinned by name (a string the frontend renders as a stepper) and
-# by index (1-based, used for the percent bar). The list is split in two so
-# the worker can collapse the Packer block when a deployment doesn't need a
-# Packer build — that decision is made after the git clone has finished and
-# we can see whether ``packer/template.pkr.hcl`` exists.
+# by index (1-based, used for the percent bar).
 
 PHASE_STARTING = "STARTING"
 PHASE_OPENSTACK_SETUP = "OPENSTACK_SETUP"
 PHASE_GIT_CLONE = "GIT_CLONE"
 PHASE_CREDS_MATERIALISE = "CREDS_MATERIALISE"
-PHASE_PACKER_INIT = "PACKER_INIT"
-PHASE_PACKER_VALIDATE = "PACKER_VALIDATE"
-PHASE_PACKER_BUILD = "PACKER_BUILD"
-PHASE_TERRAFORM_INIT = "TERRAFORM_INIT"
-PHASE_TERRAFORM_PLAN = "TERRAFORM_PLAN"
-PHASE_TERRAFORM_APPLY = "TERRAFORM_APPLY"
+PHASE_TOFU_INIT = "TOFU_INIT"
+PHASE_TOFU_PLAN = "TOFU_PLAN"
+PHASE_TOFU_APPLY = "TOFU_APPLY"
 PHASE_OUTPUTS_AND_CLEANUP = "OUTPUTS_AND_CLEANUP"
-PHASE_TERRAFORM_DESTROY = "TERRAFORM_DESTROY"
+PHASE_TOFU_DESTROY = "TOFU_DESTROY"
 PHASE_CLEANUP = "CLEANUP"
 # Pause/resume share the deploy/destroy preamble but their hot phase is
 # a CLI-driven server stop/start, so they get distinct phase names rather
-# than reusing TERRAFORM_DESTROY.
+# than reusing TOFU_DESTROY.
 PHASE_SERVER_STOP = "SERVER_STOP"
 PHASE_SERVER_START = "SERVER_START"
 
-_PHASES_WITH_PACKER = (
+_PHASES_DEPLOY = (
     PHASE_STARTING,
     PHASE_OPENSTACK_SETUP,
     PHASE_GIT_CLONE,
     PHASE_CREDS_MATERIALISE,
-    PHASE_PACKER_INIT,
-    PHASE_PACKER_VALIDATE,
-    PHASE_PACKER_BUILD,
-    PHASE_TERRAFORM_INIT,
-    PHASE_TERRAFORM_PLAN,
-    PHASE_TERRAFORM_APPLY,
-    PHASE_OUTPUTS_AND_CLEANUP,
-)
-_PHASES_WITHOUT_PACKER = (
-    PHASE_STARTING,
-    PHASE_OPENSTACK_SETUP,
-    PHASE_GIT_CLONE,
-    PHASE_CREDS_MATERIALISE,
-    PHASE_TERRAFORM_INIT,
-    PHASE_TERRAFORM_PLAN,
-    PHASE_TERRAFORM_APPLY,
+    PHASE_TOFU_INIT,
+    PHASE_TOFU_PLAN,
+    PHASE_TOFU_APPLY,
     PHASE_OUTPUTS_AND_CLEANUP,
 )
 
-
-def _phases_for_templates(templates: list[_PackerTemplate]) -> tuple[str, ...]:
-    """Build the phase tuple based on the discovered Packer templates.
-
-    * No templates → ``_PHASES_WITHOUT_PACKER`` (clone, then straight
-      to terraform).
-    * One template with key ``"default"`` (legacy layout) →
-      ``_PHASES_WITH_PACKER`` verbatim. The phase names stay
-      ``PACKER_INIT`` / ``PACKER_VALIDATE`` / ``PACKER_BUILD`` with no
-      key suffix.
-    * Multi (any other shape) → one
-      ``PACKER_INIT:<key>`` / ``PACKER_VALIDATE:<key>`` /
-      ``PACKER_BUILD:<key>`` trio per template, inserted where the Packer
-      phases sit in ``_PHASES_WITH_PACKER``. Templates are emitted in the
-      order passed in (discovery returns them sorted by key, so the
-      stepper order is deterministic).
-    """
-    if not templates:
-        return _PHASES_WITHOUT_PACKER
-    if len(templates) == 1 and templates[0].key == "default":
-        return _PHASES_WITH_PACKER
-
-    idx = next(
-        (i for i, p in enumerate(_PHASES_WITH_PACKER) if p == PHASE_PACKER_INIT),
-        0,
-    )
-    prefix = tuple(_PHASES_WITH_PACKER[:idx])
-    suffix = tuple(
-        p for p in _PHASES_WITH_PACKER[idx:] if p not in (PHASE_PACKER_INIT, PHASE_PACKER_VALIDATE, PHASE_PACKER_BUILD)
-    )
-    packer_phases: list[str] = []
-    for t in templates:
-        packer_phases.extend(
-            [
-                f"{PHASE_PACKER_INIT}:{t.key}",
-                f"{PHASE_PACKER_VALIDATE}:{t.key}",
-                f"{PHASE_PACKER_BUILD}:{t.key}",
-            ]
-        )
-    return prefix + tuple(packer_phases) + suffix
-
-
-# Destroy uses a shorter pipeline — no Packer (we don't need a fresh
-# image to tear things down) and no plan (terraform destroy has its own
+# Destroy uses a shorter pipeline — no plan (tofu destroy has its own
 # planning step internally that we don't surface as its own progress
 # phase).
 _PHASES_DESTROY = (
@@ -322,13 +221,13 @@ _PHASES_DESTROY = (
     PHASE_OPENSTACK_SETUP,
     PHASE_GIT_CLONE,
     PHASE_CREDS_MATERIALISE,
-    PHASE_TERRAFORM_INIT,
-    PHASE_TERRAFORM_DESTROY,
+    PHASE_TOFU_INIT,
+    PHASE_TOFU_DESTROY,
     PHASE_CLEANUP,
 )
 # Per-VM redeploy reuses the destroy preamble (git clone at the same
-# release tag, materialise clouds.yaml, terraform init) and then runs
-# ``terraform apply -replace=<addr> -target=<addr>`` instead of
+# release tag, materialise clouds.yaml, tofu init) and then runs
+# ``tofu apply -replace=<addr> -target=<addr>`` instead of
 # ``destroy``. The shape mirrors destroy exactly so the SSE phase bar
 # in the UI stays familiar.
 _PHASES_REDEPLOY = (
@@ -336,12 +235,12 @@ _PHASES_REDEPLOY = (
     PHASE_OPENSTACK_SETUP,
     PHASE_GIT_CLONE,
     PHASE_CREDS_MATERIALISE,
-    PHASE_TERRAFORM_INIT,
-    PHASE_TERRAFORM_APPLY,
+    PHASE_TOFU_INIT,
+    PHASE_TOFU_APPLY,
     PHASE_CLEANUP,
 )
 # Pause / resume share the destroy preamble — git clone at the same
-# release tag, materialise clouds.yaml, terraform init so we can pull
+# release tag, materialise clouds.yaml, tofu init so we can pull
 # the canonical state from the pg backend. The hot phase is the
 # server stop / start loop. CLEANUP runs the repo shred and (for the
 # log) a final state pull, mirroring destroy's tail.
@@ -350,7 +249,7 @@ _PHASES_PAUSE = (
     PHASE_OPENSTACK_SETUP,
     PHASE_GIT_CLONE,
     PHASE_CREDS_MATERIALISE,
-    PHASE_TERRAFORM_INIT,
+    PHASE_TOFU_INIT,
     PHASE_SERVER_STOP,
     PHASE_CLEANUP,
 )
@@ -359,7 +258,7 @@ _PHASES_RESUME = (
     PHASE_OPENSTACK_SETUP,
     PHASE_GIT_CLONE,
     PHASE_CREDS_MATERIALISE,
-    PHASE_TERRAFORM_INIT,
+    PHASE_TOFU_INIT,
     PHASE_SERVER_START,
     PHASE_CLEANUP,
 )
@@ -402,20 +301,20 @@ class _PhaseTracker:
         )
 
 
-def _terraform_executor(terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema) -> TerraformExecutor:
-    """Build a TerraformExecutor bound to the deployment's pg-backend schema."""
-    return TerraformExecutor(
-        terraform_dir,
+def _tofu_executor(tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema) -> TofuExecutor:
+    """Build a TofuExecutor bound to the deployment's pg-backend schema."""
+    return TofuExecutor(
+        tofu_dir,
         env_vars=openstack_env,
         backend_conn_str=tfstate_conn_str,
         backend_schema_name=tfstate_schema,
     )
 
 
-def collect_terraform_state_helper(
-    terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger, *, local_fallback=False
+def collect_tofu_state_helper(
+    tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger, *, local_fallback=False
 ):
-    """Snapshot the terraform state for the task row (best-effort).
+    """Snapshot the tofu state for the task row (best-effort).
 
     With the pg backend the canonical state lives in Postgres; this
     snapshot is used for debugging only. When ``local_fallback`` is set
@@ -423,35 +322,35 @@ def collect_terraform_state_helper(
     ``terraform.tfstate`` file for legacy/test modes that don't configure
     a remote backend. Returns ``None`` when nothing could be read.
     """
-    if not (terraform_dir and os.path.exists(terraform_dir)):
+    if not (tofu_dir and os.path.exists(tofu_dir)):
         return None
     try:
-        pulled = _terraform_executor(terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema).state_pull()
+        pulled = _tofu_executor(tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema).state_pull()
         if pulled or not local_fallback:
             return pulled
     except Exception as e:
-        task_logger.warning(f"Could not pull terraform state: {e}", category=LogCategory.WARNING)
+        task_logger.warning(f"Could not pull tofu state: {e}", category=LogCategory.WARNING)
         if not local_fallback:
             return None
 
     # Legacy fallback — only relevant when no pg backend is configured.
-    tfstate_path = os.path.join(terraform_dir, "terraform.tfstate")
+    tfstate_path = os.path.join(tofu_dir, "terraform.tfstate")
     if os.path.exists(tfstate_path):
         try:
             with open(tfstate_path) as f:
                 return f.read()
         except Exception as e:
-            task_logger.warning(f"Could not read terraform state: {e}", category=LogCategory.WARNING)
+            task_logger.warning(f"Could not read tofu state: {e}", category=LogCategory.WARNING)
     return None
 
 
-def collect_terraform_outputs_helper(terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger):
-    """Collect terraform outputs even on partial success. ``None`` on failure."""
-    if terraform_dir and os.path.exists(terraform_dir):
+def collect_tofu_outputs_helper(tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger):
+    """Collect tofu outputs even on partial success. ``None`` on failure."""
+    if tofu_dir and os.path.exists(tofu_dir):
         try:
-            return _terraform_executor(terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema).output()
+            return _tofu_executor(tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema).output()
         except Exception as e:
-            task_logger.warning(f"Could not read terraform outputs: {e}", category=LogCategory.WARNING)
+            task_logger.warning(f"Could not read tofu outputs: {e}", category=LogCategory.WARNING)
     return None
 
 
@@ -472,32 +371,26 @@ def _extract_commit_info(repo_path: str) -> dict[str, Any]:
     }
 
 
-def _build_image_names(templates: list[_PackerTemplate], app_id: str, image_tag: str) -> dict[str, str]:
-    """Reconstruct the per-template Glance image-name map.
+def _resolve_tofu_dir(repo_path: str) -> str:
+    """Return the cloned repo's ``tofu/`` directory or raise a clear error.
 
-    Legacy single-template apps (or apps with no Packer at all) keep the
-    flat ``{"default": "<app_id>-<tag>"}`` shape; multi-image apps get one
-    ``<app_id>-<key>-<tag>`` entry per template. Used by destroy/redeploy,
-    which must name the same images the original deploy built so
-    Terraform's variable validation matches the pg-backend state.
+    The app contract is OpenTofu-only: one ``tofu/`` directory, no image
+    build. A repo that still ships ``packer/`` or ``terraform/`` was written
+    for the old contract and is rejected outright instead of being half-run,
+    so the app developer sees what to change rather than a confusing
+    failure further down the pipeline.
     """
-    if not templates or (len(templates) == 1 and templates[0].key == "default"):
-        return {"default": f"{app_id}-{image_tag}"}
-    return {t.key: f"{app_id}-{t.key}-{image_tag}" for t in templates}
-
-
-def _apply_image_name_vars(target: dict[str, Any], image_names: dict[str, str], *, legacy: bool) -> None:
-    """Inject the image-name variable(s) into a Terraform var-set.
-
-    Legacy layout gets a single flat ``image_name``; multi-image apps get
-    one ``image_name_<key>`` per template. ``legacy`` is decided by the
-    caller so this stays a pure mapping of the existing branch bodies.
-    """
-    if legacy:
-        target["image_name"] = image_names["default"]
-    else:
-        for key, name in image_names.items():
-            target[f"image_name_{key}"] = name
+    if os.path.isdir(os.path.join(repo_path, "packer")):
+        raise Exception(
+            "Packer is no longer supported: remove the packer/ directory and "
+            "provision the VM via cloud-init user_data in tofu/ instead"
+        )
+    tofu_dir = os.path.join(repo_path, "tofu")
+    if os.path.isdir(tofu_dir):
+        return tofu_dir
+    if os.path.isdir(os.path.join(repo_path, "terraform")):
+        raise Exception("Terraform is no longer supported: move terraform/ to tofu/ and rename *.tf to *.tofu")
+    raise Exception(f"OpenTofu directory not found at {tofu_dir}")
 
 
 def _cleanup_task_resources(clouds_config: PerTaskCloudsConfig | None, repo_path: str | None, task_logger: Any) -> None:
@@ -524,142 +417,6 @@ def _cleanup_task_resources(clouds_config: PerTaskCloudsConfig | None, repo_path
             task_logger.warning(f"Repository cleanup failed: {e}", category=LogCategory.WARNING)
 
 
-def _build_one_packer_image(
-    tmpl,
-    *,
-    image_name,
-    is_legacy,
-    openstack_service,
-    project_id,
-    repo_path,
-    openstack_env,
-    stream_line,
-    user_vars,
-    phase_tracker,
-    task_logger,
-):
-    """Build (or reuse) the Packer image for a single template.
-
-    Skips the build when the image already exists in Glance, and
-    coordinates concurrent workers via ``PackerBuildLock`` (only one
-    worker builds a given image; the others wait and reuse it). Raises
-    ``Exception("Packer error: ...")`` on any failure.
-    """
-    log_prefix = "" if is_legacy else f"[{tmpl.key}] "
-
-    # Phase names: legacy stays unsuffixed; multi-template apps get one
-    # ``PHASE:<key>`` trio per template.
-    init_phase = PHASE_PACKER_INIT if is_legacy else f"{PHASE_PACKER_INIT}:{tmpl.key}"
-    validate_phase = PHASE_PACKER_VALIDATE if is_legacy else f"{PHASE_PACKER_VALIDATE}:{tmpl.key}"
-    build_phase = PHASE_PACKER_BUILD if is_legacy else f"{PHASE_PACKER_BUILD}:{tmpl.key}"
-
-    build_lock = PackerBuildLock(project_id, image_name)
-    wait_announced = False
-    try:
-        while True:
-            # If the image already exists, skip the build and the lock.
-            exists, image_id = openstack_service.check_image_exists(image_name)
-            if exists:
-                task_logger.success(
-                    f"{log_prefix}Image '{image_name}' already exists (ID: {image_id}). Skipping Packer build.",
-                    category=LogCategory.STATUS,
-                )
-                break
-
-            held = build_lock.acquire_or_wait()
-            if not held:
-                # Another worker is still building the same image. Surface
-                # this in the per-deployment log once so the frontend's
-                # live tail shows *something* during the 5-second poll
-                # cycles — without it the browser sees no events and looks
-                # frozen.
-                if not wait_announced:
-                    task_logger.info(
-                        f"{log_prefix}Another worker is currently building image '{image_name}'. Waiting…",
-                        category=LogCategory.STATUS,
-                    )
-                    wait_announced = True
-                # We slept inside acquire_or_wait; re-check Glance.
-                continue
-
-            # Re-check after acquiring: another worker may have finished its
-            # build between our last check and our lock acquisition.
-            exists, image_id = openstack_service.check_image_exists(image_name)
-            if exists:
-                task_logger.success(
-                    f"{log_prefix}Image '{image_name}' built by another worker (ID: {image_id}). Skipping.",
-                    category=LogCategory.STATUS,
-                )
-                break
-
-            task_logger.info(
-                f"{log_prefix}Image '{image_name}' does not exist. Building...",
-                category=LogCategory.OPERATION,
-            )
-
-            # Pick the right packer working directory: legacy uses
-            # ``packer/`` directly; multi uses ``packer/<key>/``. Template
-            # file name is always ``template.pkr.hcl`` relative to that
-            # directory.
-            packer_dir = os.path.join(repo_path, "packer") if is_legacy else os.path.join(repo_path, "packer", tmpl.key)
-            packer = PackerExecutor(
-                packer_dir,
-                env_vars=openstack_env,
-                output_callback=stream_line,
-            )
-
-            # Per-template Packer variables. Legacy shape is the flat
-            # ``user_vars["packer"][var_name]``; multi shape is nested
-            # ``user_vars["packer"][template_key][var_name]``.
-            if is_legacy:
-                user_packer = user_vars.get("packer", {})
-            else:
-                user_packer = (user_vars.get("packer") or {}).get(tmpl.key, {}) or {}
-            packer_vars = {**user_packer}
-            packer_vars["image_name"] = image_name
-            packer_vars = encode_packer_vars(packer_vars)
-
-            task_logger.info(
-                f"{log_prefix}Packer variable keys",
-                category=LogCategory.OPERATION,
-                keys=list(packer_vars.keys()),
-                template=tmpl.key,
-                image_name=image_name,
-            )
-
-            phase_tracker.mark(init_phase, f"{log_prefix}Initializing Packer plugins")
-            success, stdout, stderr = packer.init()
-            if not success:
-                if stdout:
-                    task_logger.command_output("packer_init_stdout", stdout, returncode=1)
-                if stderr:
-                    task_logger.command_output("packer_init_stderr", stderr, returncode=1)
-                raise Exception(f"{log_prefix}Packer init failed")
-
-            phase_tracker.mark(validate_phase, f"{log_prefix}Validating Packer template")
-            success, stdout, stderr = packer.validate("template.pkr.hcl", packer_vars)
-            if not success:
-                raise Exception(f"{log_prefix}Packer validation failed: {stderr}")
-
-            phase_tracker.mark(
-                build_phase,
-                f"{log_prefix}Building image '{image_name}' (this may take minutes)",
-            )
-            success, output = packer.build("template.pkr.hcl", packer_vars)
-            if not success:
-                raise Exception(f"{log_prefix}Packer build failed: {output}")
-
-            task_logger.success(
-                f"{log_prefix}Image '{image_name}' built successfully",
-                category=LogCategory.STATUS,
-            )
-            break
-    except Exception as e:
-        raise Exception(f"Packer error: {str(e)}")
-    finally:
-        build_lock.release()
-
-
 @celery_app.task(bind=True, name="tasks.deploy_application")
 def deploy_application(
     self,
@@ -672,13 +429,13 @@ def deploy_application(
     openstack_envelope: dict[str, Any] | None = None,
 ):
     """
-    Deploy an application using Terraform and Packer
+    Deploy an application using OpenTofu
 
     Args:
         deployment_id: UUID of the deployment
         app_git_link: Git repo URL
         release: Tag/Release to checkout
-        user_vars: User variables for Packer/Terraform
+        user_vars: User variables for OpenTofu
         teams: Teams with user emails {"team_name": [{"email": "user@example.com"}]}
         openstack_envelope: Encrypted per-user OpenStack credential envelope
             shipped from the backend. Required for new deploys; the optional
@@ -686,7 +443,7 @@ def deploy_application(
             worker on rollout (we raise immediately if it's missing).
 
     Returns:
-        dict: status, logs, tf_state, commit_info, terraform_outputs
+        dict: status, logs, tf_state, commit_info, tofu_outputs
     """
     task_logger = get_logger(f"deploy:{deployment_id}", correlation_id=deployment_id)
 
@@ -704,21 +461,19 @@ def deploy_application(
 
     task_logger.set_event_emitter(_emit)
 
-    # Pessimistic phase set — assumes Packer. Demoted after git clone if
-    # the cloned repo turns out to have no Packer template.
-    phase_tracker = _PhaseTracker(task_logger, _PHASES_WITH_PACKER)
+    phase_tracker = _PhaseTracker(task_logger, _PHASES_DEPLOY)
 
     repo_path = None
     tf_state = None
     outputs = None
     commit_info = None
-    terraform_dir = None
+    tofu_dir = None
     openstack_env: dict[str, str] = {}
     clouds_config: PerTaskCloudsConfig | None = None
 
-    # Terraform's pg backend lives in a worker-only Postgres. Configured
-    # at deploy/destroy time by writing a `pg_backend_override.tf` next
-    # to the cloned repo's terraform/ directory. One schema per
+    # OpenTofu's pg backend lives in a worker-only Postgres. Configured
+    # at deploy/destroy time by writing a `pg_backend_override.tofu` next
+    # to the cloned repo's tofu/ directory. One schema per
     # deployment isolates state and locks.
     tfstate_conn_str = settings.TFSTATE_DATABASE_URL or None
     tfstate_schema = _tfstate_schema_name(deployment_id)
@@ -727,15 +482,13 @@ def deploy_application(
     if teams is None:
         teams = {}
 
-    def collect_terraform_state():
-        return collect_terraform_state_helper(
-            terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger, local_fallback=True
+    def collect_tofu_state():
+        return collect_tofu_state_helper(
+            tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger, local_fallback=True
         )
 
-    def collect_terraform_outputs():
-        return collect_terraform_outputs_helper(
-            terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger
-        )
+    def collect_tofu_outputs():
+        return collect_tofu_outputs_helper(tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger)
 
     try:
         phase_tracker.mark(PHASE_STARTING, "Starting deployment")
@@ -796,120 +549,56 @@ def deploy_application(
             category=LogCategory.STATUS,
         )
 
-        # Cache the built image by commit SHA, not by release tag:
-        # `release` is often a moving ref (e.g. "main"), so the
-        # content-addressed short SHA ensures a new commit misses the cache.
-        # Multi-image apps name each template's image ``<app_id>-<key>-<tag>``;
-        # legacy single-template apps keep the flat ``<app_id>-<tag>`` shape.
-        try:
-            templates = _discover_packer_templates(repo_path)
-        except PackerTemplateDiscoveryError as e:
-            raise Exception(f"Packer template discovery failed: {e}")
-
-        image_tag = commit_info["hash"][:8] if commit_info and commit_info.get("hash") else release
-        if len(templates) == 1 and templates[0].key == "default":
-            image_names = {"default": f"{app_id}-{image_tag}"}
-        else:
-            image_names = {t.key: f"{app_id}-{t.key}-{image_tag}" for t in templates}
-
-        # Decide once whether this deployment needs a Packer build, and
-        # adapt the phase total accordingly so the percent bar is honest.
-        # The pessimistic default (assume Packer) was set at task start;
-        # if the cloned repo has no Packer template we drop those three
-        # phases now so the next progress event lands on the right index.
-        # For multi-image apps, ``_phases_for_templates`` expands the
-        # Packer phases per template instead.
-        phase_tracker = _PhaseTracker(task_logger, _phases_for_templates(templates))
-
         # The output callback feeds each line of subprocess output into the
         # task logger as a streaming entry, which then ships it via the
-        # event emitter as a ``task-log`` event. Same callback for Packer
-        # and Terraform — the tool name distinguishes them on the receiver.
+        # event emitter as a ``task-log`` event.
         def _stream_line(tool: str, line: str) -> None:
             task_logger.tool_output_line(tool, line)
 
-        # Phase 3: Packer (optional) — guarded by a Redis lock keyed on
-        # (project_id, image_name) so two parallel workers can't both kick
-        # off a build for the same image and end up with duplicate Glance
-        # entries plus wasted compute. For multi-image apps each template
-        # has its own lock + image-exists check, so two workers can build
-        # different images of the same app in parallel.
-        if not templates:
-            task_logger.info("No Packer template found, skipping image build", category=LogCategory.SYSTEM)
-        else:
-            project_id = openstack_envelope.get("project_id") or openstack_envelope.get("project_name") or "default"
-            openstack_service = OpenStackService(env_vars=openstack_env)
-            is_legacy = len(templates) == 1 and templates[0].key == "default"
+        # Phase 3: OpenTofu
+        tofu_dir = _resolve_tofu_dir(repo_path)
 
-            for tmpl in templates:
-                _build_one_packer_image(
-                    tmpl,
-                    image_name=image_names[tmpl.key],
-                    is_legacy=is_legacy,
-                    openstack_service=openstack_service,
-                    project_id=project_id,
-                    repo_path=repo_path,
-                    openstack_env=openstack_env,
-                    stream_line=_stream_line,
-                    user_vars=user_vars,
-                    phase_tracker=phase_tracker,
-                    task_logger=task_logger,
-                )
-
-        # Phase 4: Terraform
-        terraform_dir = os.path.join(repo_path, "terraform")
-        if not os.path.exists(terraform_dir):
-            raise Exception(f"Terraform directory not found at {terraform_dir}")
-
-        terraform = None
-        terraform_vars: dict[str, Any] = {}
+        tofu = None
+        tofu_vars: dict[str, Any] = {}
         try:
-            terraform = TerraformExecutor(
-                terraform_dir,
+            tofu = TofuExecutor(
+                tofu_dir,
                 env_vars=openstack_env,
                 backend_conn_str=tfstate_conn_str,
                 backend_schema_name=tfstate_schema,
                 output_callback=_stream_line,
             )
 
-            phase_tracker.mark(PHASE_TERRAFORM_INIT, "Initializing Terraform")
-            success, stdout, stderr = terraform.init()
+            phase_tracker.mark(PHASE_TOFU_INIT, "Initializing OpenTofu")
+            success, stdout, stderr = tofu.init()
             if not success:
                 # Surface the real reason in the per-deployment log; the
                 # module-level logger only writes to worker stdout, which the
                 # frontend never sees.
                 if stdout:
-                    task_logger.command_output("terraform_init_stdout", stdout, returncode=1)
+                    task_logger.command_output("tofu_init_stdout", stdout, returncode=1)
                 if stderr:
-                    task_logger.command_output("terraform_init_stderr", stderr, returncode=1)
-                task_logger.error("Terraform init failed", category=LogCategory.ERROR)
-                raise Exception("Terraform init failed")
-            task_logger.success("Terraform initialization completed", category=LogCategory.STATUS)
+                    task_logger.command_output("tofu_init_stderr", stderr, returncode=1)
+                task_logger.error("OpenTofu init failed", category=LogCategory.ERROR)
+                raise Exception("OpenTofu init failed")
+            task_logger.success("OpenTofu initialization completed", category=LogCategory.STATUS)
 
-            # Merge user_vars with teams for Terraform. Nested structures
-            # pass through encode_terraform_vars unchanged.
-            terraform_vars = {**user_vars["terraform"]} if "terraform" in user_vars else {}
-            # Per-template image-name injection. Legacy single-template
-            # apps see a flat ``image_name``; multi-image apps declare one
-            # ``image_name_<key>`` per template, filled here.
-            _apply_image_name_vars(
-                terraform_vars,
-                image_names,
-                legacy=len(templates) == 1 and templates[0].key == "default",
-            )
+            # Merge user_vars with teams for OpenTofu. Nested structures
+            # pass through encode_tofu_vars unchanged.
+            tofu_vars = {**user_vars["tofu"]} if "tofu" in user_vars else {}
             if teams:
-                terraform_vars["users"] = teams
-            terraform_vars = encode_terraform_vars(terraform_vars)
+                tofu_vars["users"] = teams
+            tofu_vars = encode_tofu_vars(tofu_vars)
 
             # File-upload variables can balloon a single -var to hundreds
             # of KB. The Nova metadata service caps cloud-init user_data at
             # ~64 KB compressed, so warn per-variable above 120 KB to land
             # the heads-up in the worker log before a boot failure.
             _log_bytes_per_var_warn = 120 * 1024
-            for _vname, _vstr in terraform_vars.items():
+            for _vname, _vstr in tofu_vars.items():
                 if isinstance(_vstr, str) and len(_vstr) > _log_bytes_per_var_warn:
                     task_logger.warning(
-                        f"Terraform variable '{_vname}' is "
+                        f"OpenTofu variable '{_vname}' is "
                         f"{len(_vstr) // 1024} KB encoded — close to the "
                         "cloud-init user_data limit; the VM may fail to "
                         "boot if the template inlines the full value.",
@@ -917,82 +606,77 @@ def deploy_application(
                     )
 
             task_logger.info(
-                "Terraform variable keys",
+                "OpenTofu variable keys",
                 category=LogCategory.OPERATION,
-                keys=list(terraform_vars.keys()),
+                keys=list(tofu_vars.keys()),
             )
 
-            phase_tracker.mark(PHASE_TERRAFORM_PLAN, "Planning Terraform deployment")
-            success, stdout, stderr = terraform.plan(variables=terraform_vars)
+            phase_tracker.mark(PHASE_TOFU_PLAN, "Planning OpenTofu deployment")
+            success, stdout, stderr = tofu.plan(variables=tofu_vars)
             if not success:
                 if stdout:
-                    task_logger.command_output("terraform_plan_stdout", stdout, returncode=1)
+                    task_logger.command_output("tofu_plan_stdout", stdout, returncode=1)
                 if stderr:
-                    task_logger.command_output("terraform_plan_stderr", stderr, returncode=1)
-                task_logger.error("Terraform plan failed", category=LogCategory.ERROR)
-                raise Exception("Terraform plan failed")
-            task_logger.success("Terraform plan completed successfully", category=LogCategory.STATUS)
+                    task_logger.command_output("tofu_plan_stderr", stderr, returncode=1)
+                task_logger.error("OpenTofu plan failed", category=LogCategory.ERROR)
+                raise Exception("OpenTofu plan failed")
+            task_logger.success("OpenTofu plan completed successfully", category=LogCategory.STATUS)
 
-            phase_tracker.mark(PHASE_TERRAFORM_APPLY, "Applying configuration (this may take minutes)")
-            success, stdout, stderr = terraform.apply(variables=terraform_vars)
+            phase_tracker.mark(PHASE_TOFU_APPLY, "Applying configuration (this may take minutes)")
+            success, stdout, stderr = tofu.apply(variables=tofu_vars)
             if not success:
                 if stdout:
-                    task_logger.command_output("terraform_apply_stdout", stdout, returncode=1)
+                    task_logger.command_output("tofu_apply_stdout", stdout, returncode=1)
                 if stderr:
-                    task_logger.command_output("terraform_apply_stderr", stderr, returncode=1)
-                task_logger.error("Terraform apply failed", category=LogCategory.ERROR)
-                raise Exception("Terraform apply failed")
-            task_logger.success("Terraform resources created", category=LogCategory.STATUS)
+                    task_logger.command_output("tofu_apply_stderr", stderr, returncode=1)
+                task_logger.error("OpenTofu apply failed", category=LogCategory.ERROR)
+                raise Exception("OpenTofu apply failed")
+            task_logger.success("OpenTofu resources created", category=LogCategory.STATUS)
 
             # Collect outputs and state
             phase_tracker.mark(PHASE_OUTPUTS_AND_CLEANUP, "Collecting outputs")
-            outputs = collect_terraform_outputs()
-            tf_state = collect_terraform_state()
+            outputs = collect_tofu_outputs()
+            tf_state = collect_tofu_state()
 
             if outputs:
                 task_logger.info(
-                    "Terraform deployment outputs collected", category=LogCategory.OPERATION, output_count=len(outputs)
+                    "OpenTofu deployment outputs collected", category=LogCategory.OPERATION, output_count=len(outputs)
                 )
 
         except Exception as e:
             # Try to collect partial results even on failure
-            tf_state = collect_terraform_state()
-            outputs = collect_terraform_outputs()
+            tf_state = collect_tofu_state()
+            outputs = collect_tofu_outputs()
 
-            # Best-effort cleanup: a half-finished `terraform apply` typically
+            # Best-effort cleanup: a half-finished `tofu apply` typically
             # leaves orphaned OpenStack resources (networks, ports, volumes)
             # that quietly eat the project's quota. Run destroy with the same
             # variables so the apply graph can be reversed; ignore failures
             # here — we're already in the error path and re-raising below.
-            if terraform is not None and terraform_dir and os.path.exists(terraform_dir):
+            if tofu is not None and tofu_dir and os.path.exists(tofu_dir):
                 try:
                     task_logger.info(
-                        "Running terraform destroy to clean up partially-applied resources",
+                        "Running tofu destroy to clean up partially-applied resources",
                         category=LogCategory.OPERATION,
                     )
                     # Rebuild the var-set from the raw user_vars without
                     # the file payloads. Destroy doesn't need the
-                    # cloud-init bytes, but Terraform validates every
+                    # cloud-init bytes, but OpenTofu validates every
                     # declared var on every run, so an apply-only file-var
                     # would otherwise reject the cleanup with a schema error.
-                    cleanup_tf_vars = _strip_file_vars(user_vars.get("terraform") or {})
-                    _apply_image_name_vars(
-                        cleanup_tf_vars,
-                        image_names,
-                        legacy=len(templates) == 1 and templates[0].key == "default",
-                    )
+                    cleanup_tf_vars = _strip_file_vars(user_vars.get("tofu") or {})
                     if teams:
                         cleanup_tf_vars["users"] = teams
-                    terraform.destroy(variables=encode_terraform_vars(cleanup_tf_vars))
+                    tofu.destroy(variables=encode_tofu_vars(cleanup_tf_vars))
                     # Refresh state after destroy so the persisted record reflects cleanup.
-                    tf_state = collect_terraform_state()
+                    tf_state = collect_tofu_state()
                 except Exception as cleanup_error:
                     task_logger.warning(
-                        f"Terraform cleanup failed: {cleanup_error}",
+                        f"OpenTofu cleanup failed: {cleanup_error}",
                         category=LogCategory.WARNING,
                     )
 
-            raise Exception(f"Terraform error: {str(e)}")
+            raise Exception(f"OpenTofu error: {str(e)}")
 
         # The OUTPUTS_AND_CLEANUP progress event was already emitted above;
         # a second mark would land on the same index, so just log success.
@@ -1003,7 +687,7 @@ def deploy_application(
         task_logger.info("Deployment summary", category=LogCategory.SYSTEM, **summary)
 
         if outputs:
-            task_logger.info("Terraform deployment output", category=LogCategory.SYSTEM, **outputs)
+            task_logger.info("OpenTofu deployment output", category=LogCategory.SYSTEM, **outputs)
 
         result = {
             "status": "success",
@@ -1011,7 +695,7 @@ def deploy_application(
             "logs": task_logger.get_logs_dict(),
             "tf_state": tf_state,
             "commit_info": commit_info,
-            "terraform_outputs": outputs,
+            "tofu_outputs": outputs,
         }
 
         # Return result (sent via task-succeeded event)
@@ -1022,9 +706,9 @@ def deploy_application(
 
         # Try to collect any available state/outputs even on failure
         if not tf_state:
-            tf_state = collect_terraform_state()
+            tf_state = collect_tofu_state()
         if not outputs:
-            outputs = collect_terraform_outputs()
+            outputs = collect_tofu_outputs()
 
         # Raise custom exception with all details
         raise Failure(
@@ -1033,7 +717,7 @@ def deploy_application(
             logs_dict=task_logger.get_logs_dict(),
             tf_state=tf_state,
             commit_info=commit_info,
-            terraform_outputs=outputs,
+            tofu_outputs=outputs,
         )
 
     finally:
@@ -1053,14 +737,13 @@ def destroy_deployment(
     teams: dict[str, list] = None,
     openstack_envelope: dict[str, Any] | None = None,
 ):
-    """Tear down a deployment via ``terraform destroy``.
+    """Tear down a deployment via ``tofu destroy``.
 
     Mirrors ``deploy_application``'s setup (git clone at the same release
     tag, materialise the per-task clouds.yaml, configure the same pg
-    backend schema) so Terraform sees the exact same state it built.
-    Then runs ``terraform destroy -auto-approve`` instead of
-    ``plan + apply``. Same Packer image is left in Glance so a future
-    deploy of the same commit doesn't have to rebuild it.
+    backend schema) so OpenTofu sees the exact same state it built.
+    Then runs ``tofu destroy -auto-approve`` instead of
+    ``plan + apply``.
 
     All progress and log events flow through the same ``StructuredLogger``
     + Celery custom-event pipeline as deploy, so the frontend's live
@@ -1082,7 +765,7 @@ def destroy_deployment(
     repo_path = None
     tf_state: str | None = None
     commit_info: dict[str, Any] | None = None
-    terraform_dir: str | None = None
+    tofu_dir: str | None = None
     openstack_env: dict[str, str] = {}
     clouds_config: PerTaskCloudsConfig | None = None
 
@@ -1095,10 +778,8 @@ def destroy_deployment(
     def _stream_line(tool: str, line: str) -> None:
         task_logger.tool_output_line(tool, line)
 
-    def collect_terraform_state():
-        return collect_terraform_state_helper(
-            terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger
-        )
+    def collect_tofu_state():
+        return collect_tofu_state_helper(tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger)
 
     try:
         phase_tracker.mark(PHASE_STARTING, "Starting destroy")
@@ -1121,7 +802,7 @@ def destroy_deployment(
         phase_tracker.mark(PHASE_GIT_CLONE, "Cloning repository at original release tag")
         task_logger.info(
             f"Cloning {app_git_link} at {release} (same ref as the original deploy "
-            "so terraform code matches the pg-backend state)",
+            "so tofu code matches the pg-backend state)",
             category=LogCategory.OPERATION,
         )
         try:
@@ -1148,64 +829,39 @@ def destroy_deployment(
         openstack_env = clouds_config.__enter__()
         task_logger.success("Per-task clouds.yaml written", category=LogCategory.STATUS)
 
-        # Reconstruct the same image_name map the deploy task used so
-        # the variables match what terraform's state expects to
-        # validate. Glance still has the image(s), even if we won't be
-        # using them; the variable just has to be a non-empty string
-        # that satisfies the HCL declaration. For multi-image apps we
-        # discover templates here too so the right ``image_name_<key>``
-        # suffix is injected per template.
-        try:
-            templates = _discover_packer_templates(repo_path)
-        except PackerTemplateDiscoveryError as e:
-            raise Exception(f"Packer template discovery failed: {e}")
-
-        image_tag = commit_info["hash"][:8] if commit_info and commit_info.get("hash") else release
-        image_names = _build_image_names(templates, app_id, image_tag)
-
-        terraform_dir = os.path.join(repo_path, "terraform")
-        if not os.path.exists(terraform_dir):
-            raise Exception(f"Terraform directory not found at {terraform_dir}")
+        tofu_dir = _resolve_tofu_dir(repo_path)
 
         # Drop ``@openstack:file:*`` variable values before passing
-        # the var-set to terraform destroy. Files are only consumed
+        # the var-set to tofu destroy. Files are only consumed
         # at apply-time (cloud-init write_files); destroy doesn't
-        # need them, but Terraform validates every declared var on
+        # need them, but OpenTofu validates every declared var on
         # every run.
-        terraform_vars = {**user_vars["terraform"]} if "terraform" in user_vars else {}
-        terraform_vars = _strip_file_vars(terraform_vars)
-        # Inject the per-template image-name variables. Legacy single
-        # template (or no Packer at all) keeps the flat ``image_name``;
-        # multi-template apps get one ``image_name_<key>`` per template.
-        _apply_image_name_vars(
-            terraform_vars,
-            image_names,
-            legacy=not templates or (len(templates) == 1 and templates[0].key == "default"),
-        )
+        tofu_vars = {**user_vars["tofu"]} if "tofu" in user_vars else {}
+        tofu_vars = _strip_file_vars(tofu_vars)
         if teams:
-            terraform_vars["users"] = teams
-        terraform_vars = encode_terraform_vars(terraform_vars)
+            tofu_vars["users"] = teams
+        tofu_vars = encode_tofu_vars(tofu_vars)
 
-        terraform = TerraformExecutor(
-            terraform_dir,
+        tofu = TofuExecutor(
+            tofu_dir,
             env_vars=openstack_env,
             backend_conn_str=tfstate_conn_str,
             backend_schema_name=tfstate_schema,
             output_callback=_stream_line,
         )
 
-        phase_tracker.mark(PHASE_TERRAFORM_INIT, "Initializing Terraform")
-        success, stdout, stderr = terraform.init()
+        phase_tracker.mark(PHASE_TOFU_INIT, "Initializing OpenTofu")
+        success, stdout, stderr = tofu.init()
         if not success:
             if stdout:
-                task_logger.command_output("terraform_init_stdout", stdout, returncode=1)
+                task_logger.command_output("tofu_init_stdout", stdout, returncode=1)
             if stderr:
-                task_logger.command_output("terraform_init_stderr", stderr, returncode=1)
-            raise Exception("Terraform init failed")
-        task_logger.success("Terraform initialization completed", category=LogCategory.STATUS)
+                task_logger.command_output("tofu_init_stderr", stderr, returncode=1)
+            raise Exception("OpenTofu init failed")
+        task_logger.success("OpenTofu initialization completed", category=LogCategory.STATUS)
 
-        phase_tracker.mark(PHASE_TERRAFORM_DESTROY, "Destroying resources")
-        success, stdout, stderr = terraform.destroy(variables=terraform_vars)
+        phase_tracker.mark(PHASE_TOFU_DESTROY, "Destroying resources")
+        success, stdout, stderr = tofu.destroy(variables=tofu_vars)
         # A data source (e.g. the Glance image lookup) is re-read on every
         # destroy refresh. If that image/network was deleted out-of-band,
         # the refresh fails with "Your query returned no results" before any
@@ -1219,17 +875,17 @@ def destroy_deployment(
                 "down from state.",
                 category=LogCategory.WARNING,
             )
-            success, stdout, stderr = terraform.destroy(variables=terraform_vars, refresh=False)
+            success, stdout, stderr = tofu.destroy(variables=tofu_vars, refresh=False)
         if not success:
             if stdout:
-                task_logger.command_output("terraform_destroy_stdout", stdout, returncode=1)
+                task_logger.command_output("tofu_destroy_stdout", stdout, returncode=1)
             if stderr:
-                task_logger.command_output("terraform_destroy_stderr", stderr, returncode=1)
-            raise Exception("Terraform destroy failed")
-        task_logger.success("Terraform resources destroyed", category=LogCategory.STATUS)
+                task_logger.command_output("tofu_destroy_stderr", stderr, returncode=1)
+            raise Exception("OpenTofu destroy failed")
+        task_logger.success("OpenTofu resources destroyed", category=LogCategory.STATUS)
 
         phase_tracker.mark(PHASE_CLEANUP, "Pulling final state")
-        tf_state = collect_terraform_state()
+        tf_state = collect_tofu_state()
 
         task_logger.success(f"Deployment {deployment_id} destroyed successfully", category=LogCategory.STATUS)
 
@@ -1244,20 +900,20 @@ def destroy_deployment(
             "commit_info": commit_info,
             # No outputs — destroy doesn't produce any. Field is kept for
             # event-listener parity with deploy_application's payload.
-            "terraform_outputs": {},
+            "tofu_outputs": {},
         }
 
     except Exception as e:
         task_logger.exception(f"Destroy failed: {str(e)}", exception=e, deployment_id=deployment_id)
         if not tf_state:
-            tf_state = collect_terraform_state()
+            tf_state = collect_tofu_state()
         raise Failure(
             message=str(e),
             deployment_id=deployment_id,
             logs_dict=task_logger.get_logs_dict(),
             tf_state=tf_state,
             commit_info=commit_info,
-            terraform_outputs={},
+            tofu_outputs={},
         )
 
     finally:
@@ -1269,18 +925,18 @@ def destroy_deployment(
 # ----------------------------------------------------------------
 #
 # Both tasks share the destroy preamble (git clone at the same release
-# tag → per-task clouds.yaml → terraform init pointed at the pg backend)
-# so we can pull the canonical terraform state and read back which
+# tag → per-task clouds.yaml → tofu init pointed at the pg backend)
+# so we can pull the canonical tofu state and read back which
 # compute instances belong to this deployment. The hot phase is a
-# CLI-driven stop/start loop; terraform state is left untouched. Server
+# CLI-driven stop/start loop; tofu state is left untouched. Server
 # discovery goes through the state (not tags) so no app template needs
 # to opt in, and CLI idempotency lets the loop re-run safely on retry.
 
 
 def _extract_compute_instance_ids(state_json: str | None) -> list[str]:
-    """Return server IDs from a terraform pg-backend state dump.
+    """Return server IDs from a tofu pg-backend state dump.
 
-    Terraform's serialised state shape is
+    OpenTofu's serialised state shape is
     ``{"resources": [{"type": "...", "instances": [{"attributes": {"id": "..."}}]}]}``.
     Filtered to ``openstack_compute_instance_v2`` so we only stop/start
     Nova servers, not volumes / networks / security groups.
@@ -1327,7 +983,7 @@ def _run_compute_lifecycle(
 
     Mirrors :func:`destroy_deployment`'s preamble exactly so the two
     paths stay easy to reason about. Diverges only at the hot phase:
-    instead of ``terraform destroy``, we pull the state, extract
+    instead of ``tofu destroy``, we pull the state, extract
     every compute instance's ID, and shell out to
     ``openstack server stop|start`` for each.
 
@@ -1348,7 +1004,7 @@ def _run_compute_lifecycle(
     phase_tracker = _PhaseTracker(task_logger, phases)
 
     repo_path = None
-    terraform_dir: str | None = None
+    tofu_dir: str | None = None
     openstack_env: dict[str, str] = {}
     clouds_config: PerTaskCloudsConfig | None = None
 
@@ -1393,27 +1049,25 @@ def _run_compute_lifecycle(
         openstack_env = clouds_config.__enter__()
         task_logger.success("Per-task clouds.yaml written", category=LogCategory.STATUS)
 
-        terraform_dir = os.path.join(repo_path, "terraform")
-        if not os.path.exists(terraform_dir):
-            raise Exception(f"Terraform directory not found at {terraform_dir}")
+        tofu_dir = _resolve_tofu_dir(repo_path)
 
-        terraform = TerraformExecutor(
-            terraform_dir,
+        tofu = TofuExecutor(
+            tofu_dir,
             env_vars=openstack_env,
             backend_conn_str=tfstate_conn_str,
             backend_schema_name=tfstate_schema,
             output_callback=_stream_line,
         )
 
-        phase_tracker.mark(PHASE_TERRAFORM_INIT, "Initializing Terraform")
-        success, stdout, stderr = terraform.init()
+        phase_tracker.mark(PHASE_TOFU_INIT, "Initializing OpenTofu")
+        success, stdout, stderr = tofu.init()
         if not success:
             if stdout:
-                task_logger.command_output("terraform_init_stdout", stdout, returncode=1)
+                task_logger.command_output("tofu_init_stdout", stdout, returncode=1)
             if stderr:
-                task_logger.command_output("terraform_init_stderr", stderr, returncode=1)
-            raise Exception("Terraform init failed")
-        task_logger.success("Terraform initialization completed", category=LogCategory.STATUS)
+                task_logger.command_output("tofu_init_stderr", stderr, returncode=1)
+            raise Exception("OpenTofu init failed")
+        task_logger.success("OpenTofu initialization completed", category=LogCategory.STATUS)
 
         # Pull the canonical state from the pg backend, then walk it
         # to find every compute instance attached to this deployment.
@@ -1421,11 +1075,11 @@ def _run_compute_lifecycle(
         # successful apply — surface that as a hard error rather than
         # a silent no-op so the user doesn't think pause "worked" on
         # an empty deployment.
-        state_dump = terraform.state_pull()
+        state_dump = tofu.state_pull()
         server_ids = _extract_compute_instance_ids(state_dump)
         if not server_ids:
             raise Exception(
-                "No compute instances found in terraform state — "
+                "No compute instances found in tofu state — "
                 f"nothing to {action}. The deployment may have been "
                 "torn down already or never reached a successful apply."
             )
@@ -1480,10 +1134,10 @@ def _run_compute_lifecycle(
         # exist, just in a different power state), but we pull it
         # again so the task row gets a fresh snapshot for debugging.
         try:
-            tf_state_post = terraform.state_pull()
+            tf_state_post = tofu.state_pull()
         except Exception as e:
             task_logger.warning(
-                f"Could not pull terraform state post-{action}: {e}",
+                f"Could not pull tofu state post-{action}: {e}",
                 category=LogCategory.WARNING,
             )
             tf_state_post = state_dump
@@ -1499,10 +1153,10 @@ def _run_compute_lifecycle(
             "logs": task_logger.get_logs_dict(),
             "tf_state": tf_state_post,
             "commit_info": None,
-            # Pause/resume don't generate or change terraform outputs —
+            # Pause/resume don't generate or change tofu outputs —
             # field is kept for event-listener parity with the deploy
             # / destroy payload shape.
-            "terraform_outputs": {},
+            "tofu_outputs": {},
         }
 
     except Exception as e:
@@ -1513,7 +1167,7 @@ def _run_compute_lifecycle(
             logs_dict=task_logger.get_logs_dict(),
             tf_state=None,
             commit_info=None,
-            terraform_outputs={},
+            tofu_outputs={},
         )
 
     finally:
@@ -1534,8 +1188,8 @@ def pause_deployment(
     """Halt a deployment by stopping all of its compute instances.
 
     Volumes and networks are untouched, so resume restores the same
-    instances byte-for-byte. The terraform state is also untouched,
-    so a subsequent destroy proceeds normally (terraform destroy is
+    instances byte-for-byte. The tofu state is also untouched,
+    so a subsequent destroy proceeds normally (tofu destroy is
     happy to tear down SHUTOFF instances).
     """
     return _run_compute_lifecycle(
@@ -1591,7 +1245,7 @@ def resume_deployment(
 # ----------------------------------------------------------------
 #
 # Replace exactly one compute instance via
-# ``terraform apply -replace=<addr> -target=<addr>``. Everything else in
+# ``tofu apply -replace=<addr> -target=<addr>``. Everything else in
 # the deployment stays untouched. The backend whitelists the address
 # against the cached TF state before dispatch; we re-check the address
 # shape here as defense in depth. Same per-task clouds.yaml + pg backend
@@ -1640,16 +1294,16 @@ def _build_current_roster(teams: dict[str, list]) -> tuple[set[str], set[str]]:
 
 
 def _reconcile_scoped_vars_to_roster(
-    terraform_vars: dict[str, Any],
+    tofu_vars: dict[str, Any],
     teams: dict[str, list],
     task_logger: Any,
 ) -> dict[str, Any]:
     """Drop scoped-map entries whose slot keys no longer match the roster.
 
-    Redeploy replays the originally-persisted ``user_vars["terraform"]``
+    Redeploy replays the originally-persisted ``user_vars["tofu"]``
     blob, but the team/user roster may have shifted since the initial
     deploy (members added or removed, teams renamed). A scoped variable
-    keyed on the old roster would then ship Terraform a map containing
+    keyed on the old roster would then ship OpenTofu a map containing
     orphan keys — at best a noisy diff, at worst a type/required
     failure that blocks the replace.
 
@@ -1663,20 +1317,20 @@ def _reconcile_scoped_vars_to_roster(
     operator sees which slots were retired.
 
     A value that becomes empty after intersection is dropped from the
-    var-set entirely; Terraform validation handles the
+    var-set entirely; OpenTofu validation handles the
     missing-required case from there (it can pick up a declared
     default or surface the required-but-missing error properly).
     """
-    if not terraform_vars:
-        return terraform_vars
+    if not tofu_vars:
+        return tofu_vars
 
     team_keys, user_keys = _build_current_roster(teams)
     if not team_keys and not user_keys:
         # Nothing rostered — can't reconcile, leave the var-set alone.
-        return terraform_vars
+        return tofu_vars
 
     reconciled: dict[str, Any] = {}
-    for name, value in terraform_vars.items():
+    for name, value in tofu_vars.items():
         # Only dict-shaped, non-empty values can be scoped maps. Skip
         # the ``users`` injection — we set that ourselves from ``teams``
         # right after this and it's not an app-defined scoped var.
@@ -1722,7 +1376,7 @@ def _reconcile_scoped_vars_to_roster(
         if kept:
             reconciled[name] = kept
         else:
-            # All slots orphaned — drop the var entirely so terraform
+            # All slots orphaned — drop the var entirely so tofu
             # validation can fall back to the declared default (if any)
             # or surface a proper required-but-missing error.
             task_logger.warning(
@@ -1751,7 +1405,7 @@ def redeploy_resource(
 
     Args mirror ``deploy_application`` so the backend's
     ``_dispatch_lifecycle_task`` can ship the same persisted state.
-    The extra ``resource_address`` carries the Terraform state address
+    The extra ``resource_address`` carries the OpenTofu state address
     (e.g. ``openstack_compute_instance_v2.team_ide["Team-A"]``) the
     user clicked.
 
@@ -1772,7 +1426,7 @@ def redeploy_resource(
     tf_state: str | None = None
     outputs: dict[str, Any] | None = None
     commit_info: dict[str, Any] | None = None
-    terraform_dir: str | None = None
+    tofu_dir: str | None = None
     openstack_env: dict[str, str] = {}
     clouds_config: PerTaskCloudsConfig | None = None
 
@@ -1785,15 +1439,11 @@ def redeploy_resource(
     def _stream_line(tool: str, line: str) -> None:
         task_logger.tool_output_line(tool, line)
 
-    def collect_terraform_state():
-        return collect_terraform_state_helper(
-            terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger
-        )
+    def collect_tofu_state():
+        return collect_tofu_state_helper(tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger)
 
-    def collect_terraform_outputs():
-        return collect_terraform_outputs_helper(
-            terraform_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger
-        )
+    def collect_tofu_outputs():
+        return collect_tofu_outputs_helper(tofu_dir, openstack_env, tfstate_conn_str, tfstate_schema, task_logger)
 
     try:
         # Validate the address shape before we do any work. Backend
@@ -1824,7 +1474,7 @@ def redeploy_resource(
         phase_tracker.mark(PHASE_GIT_CLONE, "Cloning repository at original release tag")
         task_logger.info(
             f"Cloning {app_git_link} at {release} (same ref as the original deploy "
-            "so terraform code matches the pg-backend state)",
+            "so tofu code matches the pg-backend state)",
             category=LogCategory.OPERATION,
         )
         try:
@@ -1845,92 +1495,69 @@ def redeploy_resource(
         openstack_env = clouds_config.__enter__()
         task_logger.success("Per-task clouds.yaml written", category=LogCategory.STATUS)
 
-        # Reconstruct the same image_name map the original deploy
-        # used so the apply's variable validation matches.
-        # ``image_name`` (or ``image_name_<key>`` per template for
-        # multi-image apps) is a HCL contract variable; a mismatch
-        # would surface as a noisy "var changed" diff that wouldn't
-        # actually apply anything.
-        try:
-            templates = _discover_packer_templates(repo_path)
-        except PackerTemplateDiscoveryError as e:
-            raise Exception(f"Packer template discovery failed: {e}")
+        tofu_dir = _resolve_tofu_dir(repo_path)
 
-        image_tag = commit_info["hash"][:8] if commit_info and commit_info.get("hash") else release
-        image_names = _build_image_names(templates, app_id, image_tag)
-
-        terraform_dir = os.path.join(repo_path, "terraform")
-        if not os.path.exists(terraform_dir):
-            raise Exception(f"Terraform directory not found at {terraform_dir}")
-
-        # Build the terraform var-set like the original deploy. We KEEP
-        # file variables here: ``terraform apply -replace`` recreates the
+        # Build the tofu var-set like the original deploy. We KEEP
+        # file variables here: ``tofu apply -replace`` recreates the
         # targeted VM, so cloud-init runs fresh and needs the original
         # ``write_files`` payload. The backend pre-filters these vars for
         # non-recreating lifecycles (destroy/pause/resume) — see
         # ``_dispatch_lifecycle_task`` in backend/app/routers/deployments.py.
-        terraform_vars = {**user_vars["terraform"]} if "terraform" in user_vars else {}
+        tofu_vars = {**user_vars["tofu"]} if "tofu" in user_vars else {}
         # The persisted ``user_vars`` were keyed on the roster at deploy
         # time. Membership may have shifted since (team renames, members
         # added/removed); ship the apply only the slots that still match
-        # the current roster so terraform doesn't choke on orphan keys.
-        terraform_vars = _reconcile_scoped_vars_to_roster(terraform_vars, teams, task_logger)
-        # Inject the per-template image-name variables (legacy: flat
-        # ``image_name``; multi: one ``image_name_<key>`` per template).
-        _apply_image_name_vars(
-            terraform_vars,
-            image_names,
-            legacy=not templates or (len(templates) == 1 and templates[0].key == "default"),
-        )
+        # the current roster so tofu doesn't choke on orphan keys.
+        tofu_vars = _reconcile_scoped_vars_to_roster(tofu_vars, teams, task_logger)
         if teams:
-            terraform_vars["users"] = teams
-        terraform_vars = encode_terraform_vars(terraform_vars)
+            tofu_vars["users"] = teams
+        tofu_vars = encode_tofu_vars(tofu_vars)
 
-        terraform = TerraformExecutor(
-            terraform_dir,
+        tofu = TofuExecutor(
+            tofu_dir,
             env_vars=openstack_env,
             backend_conn_str=tfstate_conn_str,
             backend_schema_name=tfstate_schema,
             output_callback=_stream_line,
         )
 
-        phase_tracker.mark(PHASE_TERRAFORM_INIT, "Initializing Terraform")
-        success, stdout, stderr = terraform.init()
+        phase_tracker.mark(PHASE_TOFU_INIT, "Initializing OpenTofu")
+        success, stdout, stderr = tofu.init()
         if not success:
             if stdout:
-                task_logger.command_output("terraform_init_stdout", stdout, returncode=1)
+                task_logger.command_output("tofu_init_stdout", stdout, returncode=1)
             if stderr:
-                task_logger.command_output("terraform_init_stderr", stderr, returncode=1)
-            raise Exception("Terraform init failed")
-        task_logger.success("Terraform initialization completed", category=LogCategory.STATUS)
+                task_logger.command_output("tofu_init_stderr", stderr, returncode=1)
+            raise Exception("OpenTofu init failed")
+        task_logger.success("OpenTofu initialization completed", category=LogCategory.STATUS)
 
         phase_tracker.mark(
-            PHASE_TERRAFORM_APPLY,
+            PHASE_TOFU_APPLY,
             f"Applying replace for {resource_address}",
         )
-        # ``-replace`` taints the single resource so terraform plans a
+        # ``-replace`` taints the single resource so tofu plans a
         # destroy+create on it; ``-target`` scopes the apply to that
         # resource (and its dependencies) so the rest of the graph is
         # untouched.
-        success, stdout, stderr = terraform.apply(
-            variables=terraform_vars,
+        success, stdout, stderr = tofu.apply(
+            variables=tofu_vars,
             targets=[resource_address],
             replace=[resource_address],
         )
         if not success:
             if stdout:
-                task_logger.command_output("terraform_apply_stdout", stdout, returncode=1)
+                task_logger.command_output("tofu_apply_stdout", stdout, returncode=1)
             if stderr:
-                task_logger.command_output("terraform_apply_stderr", stderr, returncode=1)
-            raise Exception("Terraform apply (replace) failed")
+                task_logger.command_output("tofu_apply_stderr", stderr, returncode=1)
+            raise Exception("OpenTofu apply (replace) failed")
         task_logger.success(
             f"Resource {resource_address} replaced",
             category=LogCategory.STATUS,
         )
 
         phase_tracker.mark(PHASE_CLEANUP, "Pulling final state")
-        tf_state = collect_terraform_state()
-        outputs = collect_terraform_outputs()
+        tf_state = collect_tofu_state()
+        outputs = collect_tofu_outputs()
 
         task_logger.success(
             f"Deployment {deployment_id} redeploy of {resource_address} completed",
@@ -1943,20 +1570,20 @@ def redeploy_resource(
             "logs": task_logger.get_logs_dict(),
             "tf_state": tf_state,
             "commit_info": commit_info,
-            "terraform_outputs": outputs or {},
+            "tofu_outputs": outputs or {},
         }
 
     except Exception as e:
         task_logger.exception(f"Redeploy failed: {str(e)}", exception=e, deployment_id=deployment_id)
         if not tf_state:
-            tf_state = collect_terraform_state()
+            tf_state = collect_tofu_state()
         raise Failure(
             message=str(e),
             deployment_id=deployment_id,
             logs_dict=task_logger.get_logs_dict(),
             tf_state=tf_state,
             commit_info=commit_info,
-            terraform_outputs=outputs or {},
+            tofu_outputs=outputs or {},
         )
 
     finally:

@@ -7,7 +7,7 @@ import pytest
 
 @pytest.mark.unit
 class TestComputeInstanceExtractor:
-    """Walk realistic terraform state shapes and surface the server IDs."""
+    """Walk realistic tofu state shapes and surface the server IDs."""
 
     def test_extracts_compute_instance_ids(self):
         from app.tasks import _extract_compute_instance_ids
@@ -72,7 +72,7 @@ class TestComputeInstanceExtractor:
     def test_accepts_dict_input(self):
         """The helper accepts both serialised JSON and pre-parsed dicts.
 
-        ``terraform.state_pull()`` returns a string, but tests find it
+        ``tofu.state_pull()`` returns a string, but tests find it
         easier to pass a dict directly. Supporting both keeps the
         helper friendly without making callers serialise first.
         """

@@ -2,7 +2,7 @@
 
 [![Coverage](https://img.shields.io/endpoint?url=https://six7-click-n-deploy.github.io/worker/badge.json)](https://six7-click-n-deploy.github.io/worker/)
 
-Celery-Worker des App Stores. Konsumiert Deployment-Tasks aus RabbitMQ, klont das App-Repository, führt Packer + Terraform aus und provisioniert auf OpenStack.
+Celery-Worker des App Stores. Konsumiert Deployment-Tasks aus RabbitMQ, klont das App-Repository, führt OpenTofu aus und provisioniert auf OpenStack.
 
 ## Setup
 
@@ -25,23 +25,29 @@ Tests, Lint und Format laufen im Worker-Container — `make shell-worker` öffne
 
 ## Was der Worker tut
 
-- **Deploy**: klont das App-Repo am Release-Tag, baut bei Bedarf ein Packer-Image, führt `terraform apply` aus
-- **Destroy**: `terraform destroy` gegen denselben Tag/dieselben Variablen
+- **Deploy**: klont das App-Repo am Release-Tag, führt `tofu apply` aus. Ein Image wird nicht gebaut: die VM richtet sich beim Boot über cloud-init (`user_data` im `tofu/`-Code der App) selbst ein
+- **Destroy**: `tofu destroy` gegen denselben Tag/dieselben Variablen
 - **Update**: deployt neue Version im Bestands-State
 - **OpenStack-Auth**: per-Task `clouds.yaml`, generiert aus dem vom Backend verschlüsselten Credentials-Envelope
 
 ## Technologie-Stack
 
 - **Celery 5** mit RabbitMQ als Broker, Redis als Result-Backend
-- **Terraform 1.x** mit Postgres-Remote-State
-- **Packer 1.x** für Image-Builds
+- **OpenTofu 1.x** mit Postgres-Remote-State
 - **GitPython** für Repo-Klone
 - **SQLAlchemy 2.0** nur lesend gegen die App-DB
 - **pytest** mit `unit` und `integration` als Markern
 
+## App-Vertrag
+
+Der Worker erwartet im App-Repo genau ein Verzeichnis `tofu/` mit `*.tofu`-Dateien.
+Ein Repo, das noch `packer/` oder `terraform/` mitbringt, lehnt er mit einer
+Fehlermeldung ab, die den nötigen Umbau nennt (`_resolve_tofu_dir` in `tasks.py`).
+Hintergrund: ADR 0010 im deployment-Repo.
+
 ## Code-Struktur
 
-Der Code liegt in `app/`. Einstieg ist `tasks.py`: Celery ruft eine Task-Funktion auf, die die Services orchestriert — Repo klonen → (optional) Packer → Terraform → OpenStack. Jeder Service kapselt genau einen dieser Schritte.
+Der Code liegt in `app/`. Einstieg ist `tasks.py`: Celery ruft eine Task-Funktion auf, die die Services orchestriert — Repo klonen → OpenTofu → OpenStack. Jeder Service kapselt genau einen dieser Schritte.
 
 ```
 app/
@@ -56,8 +62,8 @@ app/
 
 | Task | Zweck |
 |---|---|
-| `tasks.deploy_application` | Repo klonen → ggf. Packer-Image → `terraform apply` |
-| `tasks.destroy_deployment` | `terraform destroy` gegen denselben State |
+| `tasks.deploy_application` | Repo klonen → `tofu plan` → `tofu apply` |
+| `tasks.destroy_deployment` | `tofu destroy` gegen denselben State |
 | `tasks.pause_deployment` | VMs stoppen (Daten bleiben) |
 | `tasks.resume_deployment` | Pausierte VMs wieder starten |
 | `tasks.redeploy_resource` | Einzelne Ressource im Bestands-State neu ausrollen |
@@ -69,12 +75,9 @@ Die `Failure`-Exception in `tasks.py` trägt strukturierte Fehlerdaten durch Cel
 | Service | Zweck |
 |---|---|
 | `git_service` | Klont das App-Repo am Release-Tag (HTTPS + Token) |
-| `packer_discovery` | Findet Packer-Templates im geklonten Repo |
-| `packer_executor` | Führt Packer-Builds aus (strukturiertes Logging) |
-| `terraform_executor` | Führt `terraform init/plan/apply/destroy` aus (Postgres-Remote-State) |
+| `tofu_executor` | Führt `tofu init/plan/apply/destroy` aus (Postgres-Remote-State) |
 | `openstack_auth` | Materialisiert per-Task `clouds.yaml` aus dem verschlüsselten Credentials-Envelope |
-| `openstack_service` | OpenStack-Operationen, v.a. Image-Management |
-| `build_lock` | Redis-Lock um den Packer-Build, damit parallele Tasks nicht dasselbe Image doppelt bauen |
+| `openstack_service` | VMs stoppen/starten für Pause und Resume |
 
 ## Mehr
 

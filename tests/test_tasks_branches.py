@@ -1,9 +1,8 @@
 """Branch-coverage tests for worker/app/tasks.py.
 
-These tests mock every external boundary (TerraformExecutor, PackerExecutor,
-PerTaskCloudsConfig, git_service, OpenStackService, PackerBuildLock,
-packer-template discovery) so each test exercises one decision branch of the
-real task code without touching disk, processes, or the network.
+These tests mock every external boundary (TofuExecutor, PerTaskCloudsConfig,
+git_service, OpenStackService) so each test exercises one decision branch of
+the real task code without touching processes or the network.
 
 Celery tasks declared with ``bind=True`` are invoked here via ``task.run(...)``
 — that's a method bound to the Task instance, so ``self`` inside the task
@@ -17,33 +16,26 @@ import os
 import pytest
 
 from app.tasks import (
-    _PHASES_WITH_PACKER,
+    _PHASES_DEPLOY,
     Failure,
     _build_current_roster,
     _looks_like_file_var_value,
-    _phases_for_templates,
     _PhaseTracker,
     _reconcile_scoped_vars_to_roster,
     _scrub_nested_nones,
     _strip_file_vars,
     _tfstate_schema_name,
+    collect_tofu_outputs_helper,
+    collect_tofu_state_helper,
     deploy_application,
     destroy_deployment,
-    encode_packer_vars,
-    encode_terraform_vars,
+    encode_tofu_vars,
     pause_deployment,
     redeploy_resource,
     resume_deployment,
 )
 
 # --- Helpers ----------------------------------------------------------------
-
-
-class _FakeTemplate:
-    """Stand-in for ``_PackerTemplate``: any object with a ``.key`` attr works."""
-
-    def __init__(self, key: str) -> None:
-        self.key = key
 
 
 def _silence_events(mocker, task):
@@ -60,8 +52,8 @@ def _make_clouds_config_mock(mocker):
     return cls, cc
 
 
-def _make_terraform_executor_mock(mocker, *, init=True, plan=True, apply_=True, destroy=True, state="{}", output=None):
-    """Patch ``TerraformExecutor`` so every method returns the supplied stub.
+def _make_tofu_executor_mock(mocker, *, init=True, plan=True, apply_=True, destroy=True, state="{}", output=None):
+    """Patch ``TofuExecutor`` so every method returns the supplied stub.
 
     The same instance is returned for every constructor call so the test can
     inspect call args across the whole task body.
@@ -73,34 +65,16 @@ def _make_terraform_executor_mock(mocker, *, init=True, plan=True, apply_=True, 
     inst.destroy.return_value = (destroy, "destroy-stdout", "destroy-stderr")
     inst.state_pull.return_value = state
     inst.output.return_value = output if output is not None else {"ip": "1.2.3.4"}
-    cls = mocker.patch("app.tasks.TerraformExecutor", return_value=inst)
+    cls = mocker.patch("app.tasks.TofuExecutor", return_value=inst)
     return cls, inst
 
 
-def _make_packer_mock(mocker, *, init=True, validate=True, build=True):
+def _make_openstack_service_mock(mocker):
     inst = mocker.MagicMock()
-    inst.init.return_value = (init, "p-stdout", "p-stderr")
-    inst.validate.return_value = (validate, "p-stdout", "p-stderr")
-    inst.build.return_value = (build, "build-output")
-    cls = mocker.patch("app.tasks.PackerExecutor", return_value=inst)
-    return cls, inst
-
-
-def _make_openstack_service_mock(mocker, *, image_exists=False):
-    inst = mocker.MagicMock()
-    inst.check_image_exists.return_value = (image_exists, "img-id" if image_exists else None)
     inst.server_show.return_value = {"name": "vm-1", "status": "ACTIVE"}
     inst.server_stop.return_value = (True, None)
     inst.server_start.return_value = (True, None)
     cls = mocker.patch("app.tasks.OpenStackService", return_value=inst)
-    return cls, inst
-
-
-def _make_build_lock_mock(mocker, *, held=True):
-    inst = mocker.MagicMock()
-    inst.acquire_or_wait.return_value = held
-    inst.release.return_value = None
-    cls = mocker.patch("app.tasks.PackerBuildLock", return_value=inst)
     return cls, inst
 
 
@@ -130,65 +104,46 @@ def _patch_git_repo(mocker):
     return fake_commit
 
 
-def _seed_terraform_dir(repo_path: str) -> str:
-    """Create the ``terraform/`` subdir so ``os.path.exists`` checks pass."""
-    tf_dir = os.path.join(repo_path, "terraform")
-    os.makedirs(tf_dir, exist_ok=True)
-    return tf_dir
+def _seed_tofu_dir(repo_path: str) -> str:
+    """Create the ``tofu/`` subdir so the directory check passes."""
+    tofu_dir = os.path.join(repo_path, "tofu")
+    os.makedirs(tofu_dir, exist_ok=True)
+    return tofu_dir
 
 
 # --- Pure helper unit tests -------------------------------------------------
 
 
 @pytest.mark.unit
-class TestEncodeTerraformVars:
+class TestEncodeTofuVars:
     """Verify the encoding helper produces CLI-safe strings."""
 
     def test_dict_value_is_json_encoded(self):
         """A dict value is serialised to a JSON object literal, not str()."""
-        out = encode_terraform_vars({"users": {"Team-1": [{"email": "a@b"}]}})
+        out = encode_tofu_vars({"users": {"Team-1": [{"email": "a@b"}]}})
         # Must round-trip through JSON, not Python repr (no single quotes).
         assert json.loads(out["users"]) == {"Team-1": [{"email": "a@b"}]}
 
     def test_list_value_is_json_encoded(self):
         """A list value comes out as a JSON array literal."""
-        out = encode_terraform_vars({"ports": [22, 80]})
+        out = encode_tofu_vars({"ports": [22, 80]})
         assert out["ports"] == "[22, 80]"
 
     def test_bool_lowercased(self):
         """HCL accepts only lowercase booleans, never Python's ``True``."""
-        out = encode_terraform_vars({"flag": True, "off": False})
+        out = encode_tofu_vars({"flag": True, "off": False})
         assert out["flag"] == "true"
         assert out["off"] == "false"
 
     def test_none_top_level_dropped(self):
         """A top-level ``None`` value is omitted entirely (no -var emitted)."""
-        out = encode_terraform_vars({"keep": "x", "drop": None})
+        out = encode_tofu_vars({"keep": "x", "drop": None})
         assert out == {"keep": "x"}
 
     def test_nested_none_scrubbed(self):
         """Nested ``None`` keys/items are stripped recursively before encoding."""
-        out = encode_terraform_vars({"m": {"a": None, "b": [1, None, 2]}})
+        out = encode_tofu_vars({"m": {"a": None, "b": [1, None, 2]}})
         assert json.loads(out["m"]) == {"b": [1, 2]}
-
-
-@pytest.mark.unit
-class TestEncodePackerVars:
-    """Packer encodes typed lists as JSON arrays (not comma joins)."""
-
-    def test_list_becomes_json_array(self):
-        """A list value emits an HCL-compatible JSON array literal."""
-        out = encode_packer_vars({"net": ["NAT"]})
-        assert out["net"] == '["NAT"]'
-
-    def test_dict_becomes_json_object(self):
-        """A dict value emits a JSON object literal."""
-        out = encode_packer_vars({"m": {"a": 1}})
-        assert out["m"] == '{"a": 1}'
-
-    def test_bool_lowercased(self):
-        """Bool values match HCL's lowercase literals."""
-        assert encode_packer_vars({"x": False})["x"] == "false"
 
 
 @pytest.mark.unit
@@ -240,27 +195,17 @@ class TestSchemaName:
 
 
 @pytest.mark.unit
-class TestPhasesForTemplates:
-    """Phase tuple is rebuilt depending on how many templates were discovered."""
+class TestDeployPhases:
+    """The deploy phase set is fixed — there is no image-build block any more."""
 
-    def test_empty_templates_drops_packer_block(self):
-        """No template → ``_PHASES_WITHOUT_PACKER`` (no packer phases at all)."""
-        phases = _phases_for_templates([])
-        assert "PACKER_INIT" not in phases
-        assert "PACKER_BUILD" not in phases
+    def test_no_image_build_phases(self):
+        """No phase name refers to an image build."""
+        assert not any("PACKER" in p for p in _PHASES_DEPLOY)
 
-    def test_legacy_single_default_template_uses_unsuffixed_phases(self):
-        """A single ``default`` template uses the legacy unsuffixed phase names."""
-        phases = _phases_for_templates([_FakeTemplate("default")])
-        assert phases == _PHASES_WITH_PACKER
-
-    def test_multi_template_emits_suffixed_phases_per_template(self):
-        """Multi-template repos get one ``PACKER_*:<key>`` trio per template."""
-        phases = _phases_for_templates([_FakeTemplate("web"), _FakeTemplate("db")])
-        assert "PACKER_INIT:web" in phases
-        assert "PACKER_BUILD:db" in phases
-        # Order is preserved as caller passed.
-        assert phases.index("PACKER_INIT:web") < phases.index("PACKER_INIT:db")
+    def test_tofu_phases_in_order(self):
+        """init → plan → apply, in that order."""
+        idx = [_PHASES_DEPLOY.index(p) for p in ("TOFU_INIT", "TOFU_PLAN", "TOFU_APPLY")]
+        assert idx == sorted(idx)
 
 
 @pytest.mark.unit
@@ -338,189 +283,96 @@ class TestReconcileScopedVarsToRoster:
 class TestDeployApplication:
     """Branch coverage for the main deploy task body."""
 
-    def test_happy_path_legacy_single_template(self, mocker, tmp_path):
-        """Single ``default`` template -> packer init+validate+build then terraform plan/apply."""
-        repo_path = str(tmp_path / "repo")
-        os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
-
+    def _prepare(self, mocker, repo_path):
         _silence_events(mocker, deploy_application)
         _make_git_mock(mocker, repo_path)
         _patch_git_repo(mocker)
         _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[_FakeTemplate("default")])
-        _make_openstack_service_mock(mocker, image_exists=False)
-        _, lock_inst = _make_build_lock_mock(mocker, held=True)
-        _, packer_inst = _make_packer_mock(mocker)
-        _, tf_inst = _make_terraform_executor_mock(mocker)
+        _make_openstack_service_mock(mocker)
+        return _make_tofu_executor_mock(mocker)
 
-        result = deploy_application.run(
-            deployment_id="dep-1",
-            app_id="myapp",
-            app_git_link="https://git/repo.git",
-            release="v1",
-            user_vars={"packer": {"flavor": "m1.small"}, "terraform": {"region": "eu"}},
-            teams={"T1": [{"email": "a@x"}]},
-            openstack_envelope={"project_id": "p1"},
-        )
+    def _run(self, **overrides):
+        kwargs = {
+            "deployment_id": "dep-1",
+            "app_id": "myapp",
+            "app_git_link": "https://git/repo.git",
+            "release": "v1",
+            "user_vars": {"tofu": {"region": "eu"}},
+            "teams": {"T1": [{"email": "a@x"}]},
+            "openstack_envelope": {"project_id": "p1"},
+        }
+        kwargs.update(overrides)
+        return deploy_application.run(**kwargs)
+
+    def test_happy_path(self, mocker, tmp_path):
+        """tofu init → plan → apply, outputs land in ``tofu_outputs``."""
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(repo_path)
+        _seed_tofu_dir(repo_path)
+        cls, tofu_inst = self._prepare(mocker, repo_path)
+
+        result = self._run()
 
         assert result["status"] == "success"
         assert result["deployment_id"] == "dep-1"
-        assert result["terraform_outputs"] == {"ip": "1.2.3.4"}
-        assert packer_inst.init.called
-        assert packer_inst.build.called
-        assert tf_inst.plan.called and tf_inst.apply.called
-        assert not tf_inst.destroy.called
-        lock_inst.acquire_or_wait.assert_called_once()
-        lock_inst.release.assert_called_once()
+        assert result["tofu_outputs"] == {"ip": "1.2.3.4"}
+        assert cls.call_args.args[0] == os.path.join(repo_path, "tofu")
+        assert tofu_inst.init.called and tofu_inst.plan.called and tofu_inst.apply.called
+        assert not tofu_inst.destroy.called
+        applied_vars = tofu_inst.apply.call_args.kwargs["variables"]
+        assert applied_vars["region"] == "eu"
+        assert json.loads(applied_vars["users"]) == {"T1": [{"email": "a@x"}]}
+        assert "image_name" not in applied_vars
 
-    def test_multi_template_iterates_each_discovered(self, mocker, tmp_path):
-        """Multi-template repo runs Packer once per template (in order)."""
+    def test_packer_dir_is_rejected(self, mocker, tmp_path):
+        """A repo that still ships ``packer/`` fails before any tofu call."""
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(os.path.join(repo_path, "packer"))
+        _seed_tofu_dir(repo_path)
+        _, tofu_inst = self._prepare(mocker, repo_path)
+
+        with pytest.raises(Failure) as exc:
+            self._run()
+
+        assert "Packer is no longer supported" in str(exc.value)
+        tofu_inst.init.assert_not_called()
+
+    def test_terraform_dir_is_rejected(self, mocker, tmp_path):
+        """A repo with ``terraform/`` but no ``tofu/`` names the fix."""
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(os.path.join(repo_path, "terraform"))
+        _, tofu_inst = self._prepare(mocker, repo_path)
+
+        with pytest.raises(Failure) as exc:
+            self._run()
+
+        assert "move terraform/ to tofu/" in str(exc.value)
+        tofu_inst.init.assert_not_called()
+
+    def test_missing_tofu_dir_raises(self, mocker, tmp_path):
+        """No ``tofu/`` and nothing legacy either → plain not-found error."""
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _, tofu_inst = self._prepare(mocker, repo_path)
+
+        with pytest.raises(Failure) as exc:
+            self._run()
+
+        assert "OpenTofu directory not found" in str(exc.value)
+        tofu_inst.init.assert_not_called()
+
+    def test_tofu_apply_failure_triggers_cleanup_destroy(self, mocker, tmp_path):
+        """A non-zero ``tofu apply`` raises Failure and attempts cleanup destroy."""
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, deploy_application)
         _make_git_mock(mocker, repo_path)
         _patch_git_repo(mocker)
         _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[_FakeTemplate("web"), _FakeTemplate("db")])
-        _make_openstack_service_mock(mocker, image_exists=False)
-        _make_build_lock_mock(mocker, held=True)
-        _, packer_inst = _make_packer_mock(mocker)
-        _, tf_inst = _make_terraform_executor_mock(mocker)
-
-        result = deploy_application.run(
-            deployment_id="dep-1",
-            app_id="myapp",
-            app_git_link="https://git/repo.git",
-            release="v1",
-            user_vars={"packer": {"web": {"f": "x"}, "db": {"f": "y"}}, "terraform": {}},
-            teams=None,
-            openstack_envelope={"project_id": "p1"},
-        )
-
-        assert result["status"] == "success"
-        assert packer_inst.build.call_count == 2
-        applied_vars = tf_inst.apply.call_args.kwargs["variables"]
-        assert "image_name_web" in applied_vars
-        assert "image_name_db" in applied_vars
-
-    def test_skip_packer_when_image_exists(self, mocker, tmp_path):
-        """check_image_exists True → packer methods never invoked, terraform still runs."""
-        repo_path = str(tmp_path / "repo")
-        os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
-
-        _silence_events(mocker, deploy_application)
-        _make_git_mock(mocker, repo_path)
-        _patch_git_repo(mocker)
-        _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[_FakeTemplate("default")])
-        _make_openstack_service_mock(mocker, image_exists=True)
-        _, lock_inst = _make_build_lock_mock(mocker)
-        _, packer_inst = _make_packer_mock(mocker)
-        _, tf_inst = _make_terraform_executor_mock(mocker)
-
-        result = deploy_application.run(
-            deployment_id="dep-1",
-            app_id="myapp",
-            app_git_link="https://git/repo.git",
-            release="v1",
-            user_vars={"terraform": {}},
-            teams=None,
-            openstack_envelope={"project_id": "p1"},
-        )
-
-        assert result["status"] == "success"
-        packer_inst.init.assert_not_called()
-        packer_inst.build.assert_not_called()
-        lock_inst.acquire_or_wait.assert_not_called()
-        assert tf_inst.apply.called
-
-    def test_build_lock_wait_then_image_appears(self, mocker, tmp_path):
-        """acquire_or_wait False once → loop announces waiting then notices image arrived."""
-        repo_path = str(tmp_path / "repo")
-        os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
-
-        _silence_events(mocker, deploy_application)
-        _make_git_mock(mocker, repo_path)
-        _patch_git_repo(mocker)
-        _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[_FakeTemplate("default")])
-
-        os_inst = mocker.MagicMock()
-        os_inst.check_image_exists.side_effect = [(False, None), (True, "id-x")]
-        mocker.patch("app.tasks.OpenStackService", return_value=os_inst)
-
-        lock_inst = mocker.MagicMock()
-        lock_inst.acquire_or_wait.return_value = False  # blocked → wait branch
-        mocker.patch("app.tasks.PackerBuildLock", return_value=lock_inst)
-
-        _, packer_inst = _make_packer_mock(mocker)
-        _, tf_inst = _make_terraform_executor_mock(mocker)
-
-        result = deploy_application.run(
-            deployment_id="dep-1",
-            app_id="myapp",
-            app_git_link="https://git/repo.git",
-            release="v1",
-            user_vars={"terraform": {}},
-            teams=None,
-            openstack_envelope={"project_id": "p1"},
-        )
-
-        assert result["status"] == "success"
-        packer_inst.build.assert_not_called()
-        assert tf_inst.apply.called
-
-    def test_packer_build_failure_skips_terraform(self, mocker, tmp_path):
-        """A failing ``packer.build`` raises before any terraform method runs."""
-        repo_path = str(tmp_path / "repo")
-        os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
-
-        _silence_events(mocker, deploy_application)
-        _make_git_mock(mocker, repo_path)
-        _patch_git_repo(mocker)
-        _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[_FakeTemplate("default")])
-        _make_openstack_service_mock(mocker, image_exists=False)
-        _make_build_lock_mock(mocker, held=True)
-        _make_packer_mock(mocker, build=False)
-        _, tf_inst = _make_terraform_executor_mock(mocker)
-
-        with pytest.raises(Failure):
-            deploy_application.run(
-                deployment_id="dep-1",
-                app_id="myapp",
-                app_git_link="https://git/repo.git",
-                release="v1",
-                user_vars={"terraform": {}},
-                teams=None,
-                openstack_envelope={"project_id": "p1"},
-            )
-
-        # Terraform init/plan/apply must NOT have been called.
-        tf_inst.init.assert_not_called()
-        tf_inst.apply.assert_not_called()
-
-    def test_terraform_apply_failure_triggers_cleanup_destroy(self, mocker, tmp_path):
-        """A non-zero ``terraform apply`` raises Failure and attempts cleanup destroy."""
-        repo_path = str(tmp_path / "repo")
-        os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
-
-        _silence_events(mocker, deploy_application)
-        _make_git_mock(mocker, repo_path)
-        _patch_git_repo(mocker)
-        _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[])
         _make_openstack_service_mock(mocker)
-        _make_build_lock_mock(mocker)
-        _make_packer_mock(mocker)
-        _, tf_inst = _make_terraform_executor_mock(mocker, apply_=False)
+        _, tofu_inst = _make_tofu_executor_mock(mocker, apply_=False)
 
         with pytest.raises(Failure) as exc:
             deploy_application.run(
@@ -528,14 +380,14 @@ class TestDeployApplication:
                 app_id="myapp",
                 app_git_link="https://git/repo.git",
                 release="v1",
-                user_vars={"terraform": {}},
+                user_vars={"tofu": {}},
                 teams=None,
                 openstack_envelope={"project_id": "p1"},
             )
 
-        assert "Terraform apply failed" in str(exc.value)
-        assert tf_inst.destroy.called  # cleanup-after-failure
-        assert tf_inst.apply.called
+        assert "OpenTofu apply failed" in str(exc.value)
+        assert tofu_inst.destroy.called  # cleanup-after-failure
+        assert tofu_inst.apply.called
 
     def test_missing_envelope_raises_failure(self, mocker, tmp_path):
         """No ``openstack_envelope`` short-circuits with a Failure exception."""
@@ -547,7 +399,7 @@ class TestDeployApplication:
                 app_id="myapp",
                 app_git_link="https://git/repo.git",
                 release="v1",
-                user_vars={"terraform": {}},
+                user_vars={"tofu": {}},
                 teams=None,
                 openstack_envelope=None,
             )
@@ -557,17 +409,14 @@ class TestDeployApplication:
         """No secret value from openstack_envelope leaks into the captured logs."""
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, deploy_application)
         _make_git_mock(mocker, repo_path)
         _patch_git_repo(mocker)
         _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[])
         _make_openstack_service_mock(mocker)
-        _make_build_lock_mock(mocker)
-        _make_packer_mock(mocker)
-        _make_terraform_executor_mock(mocker)
+        _make_tofu_executor_mock(mocker)
 
         secret = "SUPER-SECRET-PASSWORD-9999"
         result = deploy_application.run(
@@ -575,7 +424,7 @@ class TestDeployApplication:
             app_id="myapp",
             app_git_link="https://git/repo.git",
             release="v1",
-            user_vars={"terraform": {}},
+            user_vars={"tofu": {}},
             teams=None,
             openstack_envelope={
                 "project_id": "p1",
@@ -586,31 +435,28 @@ class TestDeployApplication:
         assert secret not in serialised
 
     def test_variable_encoding_dict_passed_as_json(self, mocker, tmp_path):
-        """A dict in user_vars["terraform"] reaches terraform as JSON string."""
+        """A dict in user_vars["tofu"] reaches tofu as JSON string."""
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, deploy_application)
         _make_git_mock(mocker, repo_path)
         _patch_git_repo(mocker)
         _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[])
         _make_openstack_service_mock(mocker)
-        _make_build_lock_mock(mocker)
-        _make_packer_mock(mocker)
-        _, tf_inst = _make_terraform_executor_mock(mocker)
+        _, tofu_inst = _make_tofu_executor_mock(mocker)
 
         deploy_application.run(
             deployment_id="dep-1",
             app_id="myapp",
             app_git_link="https://git/repo.git",
             release="v1",
-            user_vars={"terraform": {"mapping": {"k": "v"}, "list": [1, 2]}},
+            user_vars={"tofu": {"mapping": {"k": "v"}, "list": [1, 2]}},
             teams=None,
             openstack_envelope={"project_id": "p1"},
         )
-        applied_vars = tf_inst.apply.call_args.kwargs["variables"]
+        applied_vars = tofu_inst.apply.call_args.kwargs["variables"]
         assert json.loads(applied_vars["mapping"]) == {"k": "v"}
         assert applied_vars["list"] == "[1, 2]"
 
@@ -623,43 +469,41 @@ class TestDestroyDeployment:
     """Branches in the destroy task body."""
 
     def test_happy_path_emits_success(self, mocker, tmp_path):
-        """A successful destroy returns status=success and calls terraform.destroy."""
+        """A successful destroy returns status=success and calls tofu.destroy."""
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, destroy_deployment)
         _make_git_mock(mocker, repo_path)
         _patch_git_repo(mocker)
         _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[])
-        _, tf_inst = _make_terraform_executor_mock(mocker)
+        _, tofu_inst = _make_tofu_executor_mock(mocker)
 
         result = destroy_deployment.run(
             deployment_id="dep-1",
             app_id="myapp",
             app_git_link="https://git/repo.git",
             release="v1",
-            user_vars={"terraform": {}},
+            user_vars={"tofu": {}},
             teams=None,
             openstack_envelope={"project_id": "p1"},
         )
         assert result["status"] == "success"
-        assert result["terraform_outputs"] == {}
-        assert tf_inst.destroy.called
+        assert result["tofu_outputs"] == {}
+        assert tofu_inst.destroy.called
 
     def test_destroy_failure_raises_failure(self, mocker, tmp_path):
-        """A failing ``terraform destroy`` raises Failure with destroy-failed message."""
+        """A failing ``tofu destroy`` raises Failure with destroy-failed message."""
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, destroy_deployment)
         _make_git_mock(mocker, repo_path)
         _patch_git_repo(mocker)
         _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[])
-        _make_terraform_executor_mock(mocker, destroy=False)
+        _make_tofu_executor_mock(mocker, destroy=False)
 
         with pytest.raises(Failure) as exc:
             destroy_deployment.run(
@@ -667,11 +511,11 @@ class TestDestroyDeployment:
                 app_id="myapp",
                 app_git_link="https://git/repo.git",
                 release="v1",
-                user_vars={"terraform": {}},
+                user_vars={"tofu": {}},
                 teams=None,
                 openstack_envelope={"project_id": "p1"},
             )
-        assert "Terraform destroy failed" in str(exc.value)
+        assert "OpenTofu destroy failed" in str(exc.value)
 
 
 # --- pause / resume ---------------------------------------------------------
@@ -684,7 +528,7 @@ class TestPauseResume:
     def _run(self, mocker, tmp_path, task, *, server_op):
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, task)
         _make_git_mock(mocker, repo_path)
@@ -702,7 +546,7 @@ class TestPauseResume:
                 ]
             }
         )
-        _make_terraform_executor_mock(mocker, state=state)
+        _make_tofu_executor_mock(mocker, state=state)
         _, os_inst = _make_openstack_service_mock(mocker)
 
         result = task.run(
@@ -730,12 +574,12 @@ class TestPauseResume:
         """Empty state → no servers found → Failure (deploy never reached apply)."""
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, pause_deployment)
         _make_git_mock(mocker, repo_path)
         _make_clouds_config_mock(mocker)
-        _make_terraform_executor_mock(mocker, state='{"resources": []}')
+        _make_tofu_executor_mock(mocker, state='{"resources": []}')
         _, os_inst = _make_openstack_service_mock(mocker)
 
         with pytest.raises(Failure) as exc:
@@ -755,7 +599,7 @@ class TestPauseResume:
         """If a single server fails to stop, the error message names it."""
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, pause_deployment)
         _make_git_mock(mocker, repo_path)
@@ -773,7 +617,7 @@ class TestPauseResume:
                 ]
             }
         )
-        _make_terraform_executor_mock(mocker, state=state)
+        _make_tofu_executor_mock(mocker, state=state)
         os_inst = mocker.MagicMock()
         os_inst.server_show.return_value = {"name": "n", "status": "ACTIVE"}
         os_inst.server_stop.side_effect = [(True, None), (False, "locked")]
@@ -802,17 +646,16 @@ class TestRedeployResource:
     """Per-VM redeploy uses ``-target`` and ``-replace``."""
 
     def test_apply_called_with_target_and_replace(self, mocker, tmp_path):
-        """terraform.apply receives the resource address in both targets and replace."""
+        """tofu.apply receives the resource address in both targets and replace."""
         repo_path = str(tmp_path / "repo")
         os.makedirs(repo_path)
-        _seed_terraform_dir(repo_path)
+        _seed_tofu_dir(repo_path)
 
         _silence_events(mocker, redeploy_resource)
         _make_git_mock(mocker, repo_path)
         _patch_git_repo(mocker)
         _make_clouds_config_mock(mocker)
-        mocker.patch("app.tasks._discover_packer_templates", return_value=[])
-        _, tf_inst = _make_terraform_executor_mock(mocker)
+        _, tofu_inst = _make_tofu_executor_mock(mocker)
 
         addr = 'openstack_compute_instance_v2.team_ide["Team-A"]'
         result = redeploy_resource.run(
@@ -820,18 +663,18 @@ class TestRedeployResource:
             app_id="myapp",
             app_git_link="https://git/repo.git",
             release="v1",
-            user_vars={"terraform": {}},
+            user_vars={"tofu": {}},
             teams=None,
             openstack_envelope={"project_id": "p1"},
             resource_address=addr,
         )
         assert result["status"] == "success"
-        kwargs = tf_inst.apply.call_args.kwargs
+        kwargs = tofu_inst.apply.call_args.kwargs
         assert kwargs["targets"] == [addr]
         assert kwargs["replace"] == [addr]
 
     def test_invalid_address_short_circuits(self, mocker, tmp_path):
-        """A malformed resource_address fails fast before any clone or terraform call."""
+        """A malformed resource_address fails fast before any clone or tofu call."""
         _silence_events(mocker, redeploy_resource)
         _make_git_mock(mocker, str(tmp_path / "repo"))
         with pytest.raises(Failure) as exc:
@@ -840,9 +683,97 @@ class TestRedeployResource:
                 app_id="myapp",
                 app_git_link="https://git/repo.git",
                 release="v1",
-                user_vars={"terraform": {}},
+                user_vars={"tofu": {}},
                 teams=None,
                 openstack_envelope={"project_id": "p1"},
                 resource_address="; rm -rf /",
             )
         assert "invalid resource_address" in str(exc.value)
+
+
+# --- state / output collection ----------------------------------------------
+
+
+@pytest.mark.unit
+class TestCollectHelpers:
+    """Best-effort state/output snapshots never raise into the task body."""
+
+    def _executor(self, mocker, **attrs):
+        inst = mocker.MagicMock(**attrs)
+        mocker.patch("app.tasks.TofuExecutor", return_value=inst)
+        return inst
+
+    def test_state_missing_dir_returns_none(self, mocker, tmp_path):
+        """No tofu dir yet (clone failed) → nothing to pull."""
+        assert collect_tofu_state_helper(str(tmp_path / "nope"), {}, None, "s", mocker.MagicMock()) is None
+
+    def test_state_pull_error_without_fallback_returns_none(self, mocker, tmp_path):
+        """A raising pull is logged and swallowed when no local fallback is allowed."""
+        self._executor(mocker, **{"state_pull.side_effect": RuntimeError("pg down")})
+        task_logger = mocker.MagicMock()
+        assert collect_tofu_state_helper(str(tmp_path), {}, None, "s", task_logger) is None
+        assert "pg down" in task_logger.warning.call_args.args[0]
+
+    def test_state_pull_error_falls_back_to_local_file(self, mocker, tmp_path):
+        """With ``local_fallback`` a failed pull reads ``terraform.tfstate`` next to the config."""
+        self._executor(mocker, **{"state_pull.side_effect": RuntimeError("pg down")})
+        (tmp_path / "terraform.tfstate").write_text('{"version": 4}')
+        out = collect_tofu_state_helper(str(tmp_path), {}, None, "s", mocker.MagicMock(), local_fallback=True)
+        assert out == '{"version": 4}'
+
+    def test_empty_pull_without_local_file_returns_none(self, mocker, tmp_path):
+        """Empty pull + fallback but no local state file → None."""
+        self._executor(mocker, **{"state_pull.return_value": ""})
+        out = collect_tofu_state_helper(str(tmp_path), {}, None, "s", mocker.MagicMock(), local_fallback=True)
+        assert out is None
+
+    def test_unreadable_local_file_is_logged(self, mocker, tmp_path):
+        """A local state path that can't be read degrades to a warning."""
+        self._executor(mocker, **{"state_pull.return_value": ""})
+        (tmp_path / "terraform.tfstate").mkdir()  # a directory: open() raises
+        task_logger = mocker.MagicMock()
+        out = collect_tofu_state_helper(str(tmp_path), {}, None, "s", task_logger, local_fallback=True)
+        assert out is None
+        task_logger.warning.assert_called_once()
+
+    def test_outputs_error_returns_none(self, mocker, tmp_path):
+        """A raising ``tofu output`` is logged and yields None."""
+        self._executor(mocker, **{"output.side_effect": RuntimeError("boom")})
+        task_logger = mocker.MagicMock()
+        assert collect_tofu_outputs_helper(str(tmp_path), {}, None, "s", task_logger) is None
+        task_logger.warning.assert_called_once()
+
+
+@pytest.mark.unit
+class TestDestroyStaleDataSource:
+    """A data source deleted out-of-band must not block the teardown."""
+
+    def test_retries_without_refresh(self, mocker, tmp_path):
+        """The 'no results' error triggers exactly one retry with ``refresh=False``."""
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(repo_path)
+        _seed_tofu_dir(repo_path)
+
+        _silence_events(mocker, destroy_deployment)
+        _make_git_mock(mocker, repo_path)
+        _patch_git_repo(mocker)
+        _make_clouds_config_mock(mocker)
+        _, tofu_inst = _make_tofu_executor_mock(mocker)
+        tofu_inst.destroy.side_effect = [
+            (False, "Error: Your query returned no results.", ""),
+            (True, "Destroy complete!", ""),
+        ]
+
+        result = destroy_deployment.run(
+            deployment_id="dep-1",
+            app_id="myapp",
+            app_git_link="https://git/repo.git",
+            release="v1",
+            user_vars={"tofu": {}},
+            teams=None,
+            openstack_envelope={"project_id": "p1"},
+        )
+
+        assert result["status"] == "success"
+        assert tofu_inst.destroy.call_count == 2
+        assert tofu_inst.destroy.call_args.kwargs["refresh"] is False

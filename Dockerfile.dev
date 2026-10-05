@@ -19,19 +19,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install OpenStack CLI
 RUN pip install --no-cache-dir python-openstackclient
 
-# Install Terraform
-ARG TERRAFORM_VERSION=1.6.6
-RUN wget https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip \
-    && unzip terraform_${TERRAFORM_VERSION}_linux_amd64.zip \
-    && mv terraform /usr/local/bin/ \
-    && rm terraform_${TERRAFORM_VERSION}_linux_amd64.zip
-
-# Install Packer
-ARG PACKER_VERSION=1.10.0
-RUN wget https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_amd64.zip \
-    && unzip packer_${PACKER_VERSION}_linux_amd64.zip \
-    && mv packer /usr/local/bin/ \
-    && rm packer_${PACKER_VERSION}_linux_amd64.zip
+ARG TARGETARCH
+ARG TOFU_VERSION=1.13.1
+ARG TOFU_SHA256_AMD64=8ccbc6f8ee21d2827715f3c6e08a9b3e0209b1e62057c05067ef117e047c1a80
+ARG TOFU_SHA256_ARM64=b9614df40575cc3fc10a8a25025b7245d961da279f715ea3efff4ddae8e6938a
+# Install OpenTofu (platform-aware). Gleiche Version und Summen wie im
+# Produktions-Dockerfile — dort steht, warum die Summen fest verdrahtet sind.
+# Bei einem Versionswechsel beide Dateien gemeinsam anheben.
+RUN ARCH="${TARGETARCH:-amd64}" && \
+    case "$ARCH" in \
+      amd64) SHA="$TOFU_SHA256_AMD64" ;; \
+      arm64) SHA="$TOFU_SHA256_ARM64" ;; \
+      *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    wget -q https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_${ARCH}.zip && \
+    echo "${SHA}  tofu_${TOFU_VERSION}_linux_${ARCH}.zip" | sha256sum -c - && \
+    unzip -qo tofu_${TOFU_VERSION}_linux_${ARCH}.zip tofu && \
+    mv tofu /usr/local/bin/ && \
+    rm -f tofu_${TOFU_VERSION}_linux_${ARCH}.zip && \
+    tofu version
 
 # Install Poetry
 RUN curl -sSL https://install.python-poetry.org | python3 - && \

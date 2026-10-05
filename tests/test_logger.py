@@ -327,9 +327,9 @@ class TestStructuredLoggerBuild:
 
     def test_known_slot_kwargs_land_on_entry(self, slogger):
         """Slot-named context kwargs are stored on the dataclass field, not in extra."""
-        slogger.info("msg", tool="terraform", returncode=2, phase="init")
+        slogger.info("msg", tool="tofu", returncode=2, phase="init")
         e = slogger.get_logs_dict()[0]
-        assert e["tool"] == "terraform"
+        assert e["tool"] == "tofu"
         assert e["returncode"] == 2
         assert e["phase"] == "init"
 
@@ -350,11 +350,11 @@ class TestStructuredLoggerBuild:
 class TestStructuredLoggerPhase:
     def test_phase_records_uppercase_marker(self, slogger):
         """phase() emits an entry whose message is the phase name in uppercase."""
-        slogger.phase("packer_build")
+        slogger.phase("tofu_apply")
         e = slogger.get_logs_dict()[0]
-        assert e["message"] == "=== PACKER_BUILD ==="
+        assert e["message"] == "=== TOFU_APPLY ==="
         assert e["category"] == "phase"
-        assert e["phase"] == "packer_build"
+        assert e["phase"] == "tofu_apply"
 
 
 @pytest.mark.unit
@@ -467,16 +467,16 @@ class TestStructuredLoggerOperations:
 class TestStructuredLoggerCommandOutput:
     def test_command_output_success_uses_info_level(self, slogger):
         """command_output with returncode=0 uses INFO/OUTPUT."""
-        slogger.command_output("packer", "all good", returncode=0)
+        slogger.command_output("tofu", "all good", returncode=0)
         e = slogger.get_logs_dict()[-1]
         assert e["level"] == "INFO"
         assert e["category"] == "output"
-        assert e["tool"] == "packer"
+        assert e["tool"] == "tofu"
         assert e["returncode"] == 0
 
     def test_command_output_failure_uses_error_level(self, slogger):
         """command_output with non-zero returncode uses ERROR/ERROR."""
-        slogger.command_output("packer", "boom", returncode=1)
+        slogger.command_output("tofu", "boom", returncode=1)
         e = slogger.get_logs_dict()[-1]
         assert e["level"] == "ERROR"
         assert e["category"] == "error"
@@ -487,15 +487,15 @@ class TestStructuredLoggerCommandOutput:
 class TestStructuredLoggerToolOutputLine:
     def test_tool_output_line_skipped_when_blank(self, slogger):
         """tool_output_line drops empty lines (post-clean)."""
-        slogger.tool_output_line("packer", "   ")
+        slogger.tool_output_line("tofu", "   ")
         assert slogger.get_logs_dict() == []
 
     def test_tool_output_line_records_streaming_entry(self, slogger):
         """tool_output_line emits a streaming entry with the tool name."""
-        slogger.tool_output_line("terraform", "applying...")
+        slogger.tool_output_line("tofu", "applying...")
         e = slogger.get_logs_dict()[0]
         assert e["streaming"] is True
-        assert e["tool"] == "terraform"
+        assert e["tool"] == "tofu"
         assert e["message"] == "applying..."
 
 
