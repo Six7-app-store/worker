@@ -30,3 +30,22 @@ CVE-2026-56865
 # selben Container. Wer die Anfragen absetzen kann, führt dort schon Code
 # aus — dann ist der Denial of Service das kleinere Problem.
 CVE-2026-84445
+
+# Nachtrag 15.10.2026, ebenfalls am tofu-Binary von OpenTofu v1.13.1 (noch
+# immer neuestes 1.13-Release; v1.12.8 waere ein Rueckschritt hinter
+# ADR 0010). Gefixt erst mit Go 1.26.9 / 1.27.2 bzw. x/net 0.60.0, mit dem
+# tofu noch nicht gebaut ist. Beim naechsten TOFU_VERSION-Sprung streichen.
+#
+# Go net/http (stdlib): DoS ueber einen Range-Header mit vielen kleinen
+# Bereichen. Betrifft HTTP-Server (FileServer, ServeContent); tofu liefert
+# keine Dateien per HTTP aus.
+CVE-2026-78667
+# Go crypto/tls (stdlib): Speichererschoepfung durch einen ClientHello mit
+# mehrfachen ECH-Outer-Extensions. Betrifft TLS-Server; tofu ist nur Client.
+CVE-2026-97031
+# HTTP/2 (stdlib und golang.org/x/net): ein Peer kann mit vielen SETTINGS-
+# Frames CPU binden, Client wie Server. tofu spricht als Client nur mit der
+# konfigurierten OpenStack-API und den Provider-Registries ueber TLS. Ein
+# boesartiger Peer dort koennte einen Deploy bis zum apply-Limit des workers
+# (30 min) aufhalten - nicht mehr. Restrisiko bewusst in Kauf genommen.
+CVE-2026-78669
