@@ -276,3 +276,23 @@ class TestServerStart:
         service.server_start("srv-1")
         assert mock_sp.call_args.args[0] == ["openstack", "server", "start", "srv-1"]
         assert mock_sp.call_args.kwargs["timeout"] == 120
+
+
+@pytest.mark.unit
+class TestServerConsoleLog:
+    """Tests for the server_console_log wrapper (waiting on cloud-init)."""
+
+    def test_returns_console_text(self, service, mocker):
+        mock_sp = mocker.patch(
+            "app.services.openstack_service.subprocess.run",
+            return_value=_CompletedStub(returncode=0, stdout="[ OK ] Finished cloud-final.service\n"),
+        )
+        assert service.server_console_log("srv-1") == "[ OK ] Finished cloud-final.service\n"
+        assert mock_sp.call_args.args[0] == ["openstack", "console", "log", "show", "--lines", "300", "srv-1"]
+
+    def test_returns_none_when_unreadable(self, service, mocker):
+        mocker.patch(
+            "app.services.openstack_service.subprocess.run",
+            return_value=_CompletedStub(returncode=1, stderr="Instance srv-1 is not ready"),
+        )
+        assert service.server_console_log("srv-1") is None

@@ -8,6 +8,7 @@ import git
 from .celery_app import celery_app
 from .config import settings
 from .services import OpenStackService, PerTaskCloudsConfig, TofuExecutor, git_service
+from .services.vm_setup import wait_for_setup
 from .utils.logger import LogCategory, get_logger
 
 logger = get_logger(__name__)
@@ -194,6 +195,7 @@ PHASE_TOFU_INIT = "TOFU_INIT"
 PHASE_TOFU_PLAN = "TOFU_PLAN"
 PHASE_TOFU_APPLY = "TOFU_APPLY"
 PHASE_OUTPUTS_AND_CLEANUP = "OUTPUTS_AND_CLEANUP"
+PHASE_VM_SETUP = "VM_SETUP"
 PHASE_TOFU_DESTROY = "TOFU_DESTROY"
 PHASE_CLEANUP = "CLEANUP"
 # Pause/resume share the deploy/destroy preamble but their hot phase is
@@ -211,6 +213,7 @@ _PHASES_DEPLOY = (
     PHASE_TOFU_PLAN,
     PHASE_TOFU_APPLY,
     PHASE_OUTPUTS_AND_CLEANUP,
+    PHASE_VM_SETUP,
 )
 
 # Destroy uses a shorter pipeline — no plan (tofu destroy has its own
@@ -678,8 +681,12 @@ def deploy_application(
 
             raise Exception(f"OpenTofu error: {str(e)}")
 
-        # The OUTPUTS_AND_CLEANUP progress event was already emitted above;
-        # a second mark would land on the same index, so just log success.
+        # Outside the apply block on purpose: a VM whose setup failed is
+        # NOT torn down. The deployment fails, but state and outputs are
+        # kept, so the VM can be inspected and then deleted as usual.
+        phase_tracker.mark(PHASE_VM_SETUP, "Waiting for the VMs to finish setting up")
+        _wait_for_vm_setup(openstack_env, tf_state, task_logger)
+
         task_logger.success(f"Deployment {deployment_id} completed successfully", category=LogCategory.STATUS)
 
         # Log summary
@@ -931,6 +938,62 @@ def destroy_deployment(
 # CLI-driven stop/start loop; tofu state is left untouched. Server
 # discovery goes through the state (not tags) so no app template needs
 # to opt in, and CLI idempotency lets the loop re-run safely on retry.
+
+
+# How long a deployment may take to set itself up after ``tofu apply``.
+# Kali needs about half an hour on a busy cloud; the limit leaves room
+# for that without letting a hung VM block a worker indefinitely. The
+# broker's consumer_timeout must stay above deploy time plus this
+# (deployment repo, ADR 0011).
+VM_SETUP_TIMEOUT_S = 90 * 60
+VM_SETUP_POLL_S = 30
+# An image without cloud-init never reports a final stage; don't wait
+# the full timeout for it. Same for a console that can't be read.
+VM_SETUP_NO_CLOUD_INIT_AFTER_S = 10 * 60
+VM_SETUP_UNREADABLE_AFTER_S = 10 * 60
+
+
+def _wait_for_vm_setup(openstack_env: dict[str, str], tf_state: str | None, task_logger: Any) -> None:
+    """Block until every VM of the deployment has finished cloud-init.
+
+    Raises when a VM's setup failed or didn't finish in time, with the
+    relevant console lines in the deployment log. See ``services/vm_setup``.
+    """
+    server_ids = _extract_compute_instance_ids(tf_state)
+    if not server_ids:
+        task_logger.info("No compute instances in state - nothing to wait for", category=LogCategory.STATUS)
+        return
+
+    task_logger.info(
+        f"Waiting for {len(server_ids)} VM(s) to finish setting up (cloud-init)",
+        category=LogCategory.OPERATION,
+        server_ids=server_ids,
+    )
+    service = OpenStackService(env_vars=openstack_env)
+    outcome = wait_for_setup(
+        server_ids,
+        service.server_console_log,
+        log=lambda msg: task_logger.info(msg, category=LogCategory.STATUS),
+        timeout_s=VM_SETUP_TIMEOUT_S,
+        poll_s=VM_SETUP_POLL_S,
+        no_cloud_init_after_s=VM_SETUP_NO_CLOUD_INIT_AFTER_S,
+        unreadable_after_s=VM_SETUP_UNREADABLE_AFTER_S,
+    )
+
+    if outcome.status == "ready":
+        task_logger.success("All VMs finished setting up", category=LogCategory.STATUS, skipped=outcome.skipped)
+        return
+    if outcome.status == "failed":
+        for line in outcome.errors:
+            task_logger.error(f"[console {outcome.server_id}] {line}", category=LogCategory.ERROR)
+        raise Exception(
+            f"Setup inside VM {outcome.server_id} failed (cloud-init final stage). "
+            "The VM was kept for inspection; see the console lines above."
+        )
+    raise Exception(
+        f"VM setup did not finish within {VM_SETUP_TIMEOUT_S // 60} minutes: {', '.join(outcome.pending)}. "
+        "The VMs were kept for inspection."
+    )
 
 
 def _extract_compute_instance_ids(state_json: str | None) -> list[str]:

@@ -207,6 +207,10 @@ class TestDeployPhases:
         idx = [_PHASES_DEPLOY.index(p) for p in ("TOFU_INIT", "TOFU_PLAN", "TOFU_APPLY")]
         assert idx == sorted(idx)
 
+    def test_vm_setup_is_the_last_phase(self):
+        """A deployment is only done once its VMs finished setting up."""
+        assert _PHASES_DEPLOY[-1] == "VM_SETUP"
+
 
 @pytest.mark.unit
 class TestPhaseTrackerUnknownPhase:
@@ -777,3 +781,68 @@ class TestDestroyStaleDataSource:
         assert result["status"] == "success"
         assert tofu_inst.destroy.call_count == 2
         assert tofu_inst.destroy.call_args.kwargs["refresh"] is False
+
+
+_STATE_ONE_VM = json.dumps(
+    {"resources": [{"type": "openstack_compute_instance_v2", "instances": [{"attributes": {"id": "srv-1"}}]}]}
+)
+
+
+@pytest.mark.unit
+class TestDeployWaitsForVmSetup:
+    """After ``tofu apply`` the task waits for cloud-init inside the VMs."""
+
+    def _prepare(self, mocker, tmp_path, console):
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(repo_path)
+        _seed_tofu_dir(repo_path)
+        _silence_events(mocker, deploy_application)
+        _make_git_mock(mocker, repo_path)
+        _patch_git_repo(mocker)
+        _make_clouds_config_mock(mocker)
+        _, os_inst = _make_openstack_service_mock(mocker)
+        os_inst.server_console_log.return_value = console
+        _, tofu_inst = _make_tofu_executor_mock(mocker, state=_STATE_ONE_VM)
+        return os_inst, tofu_inst
+
+    def _run(self):
+        return deploy_application.run(
+            deployment_id="dep-s",
+            app_id="myapp",
+            app_git_link="https://git/repo.git",
+            release="v1",
+            user_vars={"tofu": {}},
+            teams=None,
+            openstack_envelope={"project_id": "p1"},
+        )
+
+    def test_succeeds_once_setup_finished(self, mocker, tmp_path):
+        os_inst, _ = self._prepare(mocker, tmp_path, "[  OK  ] Finished cloud-final.service\n")
+        result = self._run()
+        assert result["status"] == "success"
+        os_inst.server_console_log.assert_called_with("srv-1")
+
+    def test_failed_setup_fails_the_deployment_but_keeps_the_vm(self, mocker, tmp_path):
+        console = (
+            "cloud-init[5]: install: error writing '/boot/efi/x': No space left on device\n"
+            "[FAILED] Failed to start cloud-final.service - Cloud-init: Final Stage.\n"
+        )
+        _, tofu_inst = self._prepare(mocker, tmp_path, console)
+
+        with pytest.raises(Failure) as exc:
+            self._run()
+
+        assert "Setup inside VM srv-1 failed" in str(exc.value)
+        assert not tofu_inst.destroy.called  # kept for inspection
+        logs = json.dumps(exc.value.to_dict())
+        assert "No space left on device" in logs
+
+    def test_setup_timeout_fails_the_deployment(self, mocker, tmp_path):
+        self._prepare(mocker, tmp_path, "cloud-init[5]: Unpacking kali-tools ...\n")
+        # Limit 0: the first poll already counts as "too late", no real wait.
+        mocker.patch("app.tasks.VM_SETUP_TIMEOUT_S", 0)
+
+        with pytest.raises(Failure) as exc:
+            self._run()
+
+        assert "did not finish within 0 minutes: srv-1" in str(exc.value)
