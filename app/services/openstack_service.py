@@ -121,3 +121,24 @@ class OpenStackService:
         if rc == 0:
             return (True, None)
         return (False, stderr.strip() or "openstack server start failed")
+
+    # ------------------------------------------------------------------
+    # Console (used to wait for cloud-init after deploy)
+    # ------------------------------------------------------------------
+
+    def server_console_log(self, server_id: str, lines: int = 300) -> str | None:
+        """Return the last ``lines`` lines of the instance's serial console.
+
+        This is where systemd reports whether cloud-init's final stage
+        finished or failed. Returns ``None`` when the log can't be read
+        (instance not ready yet, policy, transient failure) — the caller
+        decides how long to tolerate that.
+        """
+        rc, stdout, stderr = self._run(
+            ["openstack", "console", "log", "show", "--lines", str(lines), server_id],
+            timeout=60,
+        )
+        if rc != 0:
+            logger.warning(f"console log show failed for {server_id}: {stderr.strip()}")
+            return None
+        return stdout
