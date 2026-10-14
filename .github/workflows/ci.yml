@@ -416,7 +416,11 @@ jobs:
     name: "📦 Push"
     runs-on: ubuntu-latest
     needs: [build, image-scan]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Auch beim manuellen Lauf: der ist laut Kommentar oben fuer "nach einem
+    # behobenen Infrastrukturproblem" da - ohne Push zoege der folgende
+    # Staging-Deploy aber wieder das alte Image. Gesehen am 14.10.2026, als
+    # Actions nach einem Merge keinen push-Lauf gestartet hatte.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
       packages: write
