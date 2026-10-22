@@ -37,7 +37,7 @@ mehrere Repos gilt jede Liste für ihren Teil.
 | Auth-Header von Hand | `Authorization` irgendwo außerhalb von `src/api/axios.ts` |
 | Neue Env-Variable halb gepflegt | in einer Compose-Datei, aber nicht in `.env.example` — oder umgekehrt |
 | Harness geändert ohne Sync | `deployment/harness/*` im Diff, die erzeugten `.claude/`-Kopien aber nicht — `make harness-sync` fehlt |
-| Terraform unformatiert | `terraform fmt -check -recursive infrastructure/terraform` rot |
+| OpenTofu unformatiert | `tofu fmt -check -recursive infrastructure/tofu` rot |
 | Secret im Diff | Werte in `.env`-Form, `-----BEGIN`, Tokens, Passwörter im Klartext |
 | Test fehlt | neuer Endpunkt/Task ohne Erfolgs- **und** Verweigerungsfall |
 | ADR fehlt | Entscheidung getroffen, die teuer zurückzunehmen ist → `deployment/docs/adr/` |

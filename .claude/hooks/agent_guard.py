@@ -106,8 +106,7 @@ REPOS = {
             )
         ],
     },
-    # deployment läuft nicht im Container: das Gate ist OpenTofu (und für
-    # die Übergangsinsel infrastructure/terraform noch Terraform) am Host.
+    # deployment läuft nicht im Container: das Gate ist OpenTofu am Host.
     "deployment": {
         "container": None,
         "format": [],
@@ -346,26 +345,20 @@ def container_path(path: str, repo: str, root: str) -> str:
     return "/app/" + relative
 
 
-# Welcher IaC-Baum mit welchem Werkzeug gepflegt wird. infrastructure/tofu
-# ist OpenTofu (ADR 0010); infrastructure/terraform hält nur noch envs/moodle
-# und envs/forgejo und fällt weg, sobald die beiden umgezogen sind.
-IAC_TREES = (
-    ("tofu", "tofu"),
-    ("terraform", "terraform"),
-)
+# Welcher IaC-Baum mit welchem Werkzeug gepflegt wird. Seit ADR 0010 und
+# ADR 0015 gibt es nur noch infrastructure/tofu.
+IAC_TREES = (("tofu", "tofu"),)
 
 
 def iac_formatter(path: str):
     """Das fmt-Kommando für eine IaC-Datei, sonst None.
 
-    Die Endung entscheidet: Terraform liest keine .tofu-Dateien, und eine
-    .tf-Datei liegt nur noch in der Terraform-Übergangsinsel.
+    Die Endung entscheidet: OpenTofu liest .tofu-Dateien. Eine .tf-Datei gibt es
+    in dieser Plattform nicht mehr (ADR 0015).
     """
     posix = as_posix(path)
     if posix.endswith(".tofu"):
         return ["tofu", "fmt", path]
-    if posix.endswith((".tf", ".tfvars")):
-        return ["terraform", "fmt", path]
     return None
 
 
