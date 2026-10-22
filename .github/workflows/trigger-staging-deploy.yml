@@ -37,7 +37,7 @@ permissions: {}
 
 # Zwei Merges kurz hintereinander sollen nicht zwei Deploys uebereinander
 # starten. Der zweite wartet; abgebrochen wird nichts, weil ein laufender
-# terraform apply nichts ist, das man auf halber Strecke stehen laesst.
+# tofu apply nichts ist, das man auf halber Strecke stehen laesst.
 concurrency:
   group: staging-deploy-dispatch
   cancel-in-progress: false
