@@ -1,13 +1,14 @@
 name: CD - Staging-Deploy anstossen
 
-# Schliesst die Luecke zwischen Merge und Staging: sobald die CI auf `main`
-# durch ist und das neue Image in GHCR liegt, stoesst dieser Workflow im
-# deployment-Repository den Neuaufbau des Stacks an.
+# Schliesst die Luecke zwischen Merge und Staging: sobald die CI auf `develop`
+# durch ist und das neue Image `:develop` in GHCR liegt, stoesst dieser
+# Workflow im deployment-Repository den Neuaufbau des Stacks an. develop ist
+# Staging, main ist Produktion (ADR 0013) - ein Merge auf main loest hier
+# nichts aus.
 #
-# Bleibt vorerst auf `main`: Staging wird erst mit deployment #27 (ADR 0013)
-# auf develop umgestellt. Dann hier zusammen mit staging.yml und dem Secret
-# STAGING_ENV_FILE auf `develop` - vorher baute sonst jeder Merge auf develop
-# die Staging-VM neu, aber mit den Images von main.
+# Der Timer auf der Staging-VM zieht `:develop` ohnehin alle 5 Minuten nach.
+# Der Neuaufbau hier ist trotzdem noetig: der Timer tauscht nur Container,
+# erst der Neuaufbau bringt die VM in den Zustand, den deployment beschreibt.
 #
 # Warum der Umweg ueber das deployment-Repository: der Deploy braucht die
 # OpenStack-API der DHBW, und die ist von ausserhalb des Campusnetzes nicht
@@ -27,7 +28,7 @@ on:
   workflow_run:
     workflows: ["Worker CI/CD"]
     types: [completed]
-    branches: [main]
+    branches: [develop]
 
   # Von Hand, wenn ein Deploy ohne neuen Commit noetig ist.
   workflow_dispatch:
