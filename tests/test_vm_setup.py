@@ -25,6 +25,19 @@ FAILED = (
 
 INSTALLING = "[  805.04] cloud-init[591]: Unpacking gnome-disk-utility (46.1-3) ...\n"
 
+# What `openstack console log show` really returns (VSCode-App, 22.10.2026):
+# Nova strips control characters, so the colour codes lose their ESC.
+READY_VIA_API = (
+    "[  138.021271] cloud-init[1041]: VS-Code-Team-VM bereit - Log unter /var/log/vscode-provision.log\n"
+    "[[0;32m  OK  [0m] Finished [0;1;39mcloud-final.service[0m - Cloud-init: Final Stage.\n"
+    "[[0;32m  OK  [0m] Reached target [0;1;39mcloud-init.target[0m - Cloud-init target.\n"
+)
+
+FAILED_VIA_API = (
+    "[  708.27] cloud-init[594]: FEHLER in /opt/kali-app/02-desktop.sh Zeile 30\n"
+    "[[0;1;31mFAILED[0m] Failed to start [0;1;39mcloud-final.service[0m - Cloud-init: Final Stage.\n"
+)
+
 
 @pytest.mark.unit
 class TestClassifyConsole:
@@ -49,6 +62,15 @@ class TestClassifyConsole:
 
     def test_a_later_success_wins_over_an_earlier_failure(self):
         assert classify_console(FAILED + READY) == "ready"
+
+    def test_finished_without_esc_is_ready(self):
+        assert classify_console(READY_VIA_API) == "ready"
+
+    def test_failed_without_esc_is_failed(self):
+        assert classify_console(FAILED_VIA_API) == "failed"
+
+    def test_error_lines_without_esc_are_readable(self):
+        assert error_lines(FAILED_VIA_API)[-1].startswith("[FAILED] Failed to start cloud-final.service")
 
 
 @pytest.mark.unit

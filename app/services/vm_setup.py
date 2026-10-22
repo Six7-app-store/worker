@@ -28,7 +28,9 @@ if TYPE_CHECKING:
 
 SetupState = Literal["running", "ready", "failed"]
 
-_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# Nova's console-log API drops control characters, ESC included, so a
+# colour code arrives as plain "[0;1;39m". Match it with and without ESC.
+_ANSI = re.compile(r"\x1b?\[[0-9;]*m")
 
 _READY = "Finished cloud-final.service"
 _FAILED = "Failed to start cloud-final.service"
