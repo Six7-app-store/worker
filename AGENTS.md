@@ -55,6 +55,25 @@ scheitert ohne Nachfrage — das ist Absicht und kein Werkzeugfehler.
 
 <!-- BEGIN HARNESS GIT WORKFLOW -->
 <!-- Quelle: deployment/harness/git-workflow.md; mit harness-sync verteilen. -->
+## Branches: develop ist Staging, main ist Produktion
+
+Gilt in den vier Stack-Repos (deployment, backend, frontend, worker); die
+App-Repos haben nur `main`. Begründung: `deployment/docs/adr/0013-*.md`.
+
+- Neue Arbeit zweigt von `develop` ab (`feat/…`, `fix/…`, `chore/…`, `docs/…`)
+  und kommt per Pull Request nach `develop` zurück. Jeder Merge dort baut
+  Staging neu.
+- `main` bekommt nur Release-PRs `develop` → `main`, gemergt mit
+  **Merge-Commit** — kein Squash, kein Rebase, sonst laufen die Branches
+  auseinander. Danach `develop` per Fast-Forward nachziehen:
+  `git push origin origin/main:develop`. Ist `develop` inzwischen weiter, statt
+  dessen ein PR `main` → `develop`.
+- Hotfix: Branch von `main`, PR nach `main`, danach `main` in `develop` mergen.
+- Ein Feature über mehrere Repos geht in allen betroffenen Repos zusammen nach
+  `develop` und mit demselben Release nach `main`.
+- Agenten mergen keine Pull Requests und pushen nicht auf `main`; das tut eine
+  Person.
+
 ## Commits und Pushes bündeln
 
 - Änderungen zuerst als zusammenhängendes Arbeitspaket fertigstellen und die
