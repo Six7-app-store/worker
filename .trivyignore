@@ -14,10 +14,12 @@
 AVD-DS-0002
 
 # OpenTofu upstream CVE backlog. Gemessen am Produktions-Image mit
-# OpenTofu v1.13.1 (neuestes Release, 01.10.2026); Trivy meldet am
-# tofu-Binary genau diese drei HIGH-Befunde. Kein veröffentlichter Build
-# behebt sie. Beim nächsten TOFU_VERSION-Sprung neu scannen und alles
-# streichen, was dann sauber ist — nicht mitschleppen.
+# OpenTofu v1.13.2 (neuestes Release, 21.10.2026, gebaut mit Go 1.27.3);
+# Trivy meldet am tofu-Binary genau diese vier HIGH-Befunde. Kein
+# veröffentlichter Build behebt sie. Beim nächsten TOFU_VERSION-Sprung neu
+# scannen und alles streichen, was dann sauber ist — nicht mitschleppen.
+# (Mit v1.13.2 gestrichen: CVE-2026-78667 und CVE-2026-97031, beide stdlib,
+# behoben ab Go 1.27.2.)
 #
 # golang.org/x/mod sumdb (fixed in 0.40.0): Integritätsprüfung gegen eine
 # bösartige GOSUMDB. tofu lädt Provider über das Registry-Protokoll mit
@@ -30,22 +32,11 @@ CVE-2026-56865
 # selben Container. Wer die Anfragen absetzen kann, führt dort schon Code
 # aus — dann ist der Denial of Service das kleinere Problem.
 CVE-2026-84445
-
-# Nachtrag 15.10.2026, ebenfalls am tofu-Binary von OpenTofu v1.13.1 (noch
-# immer neuestes 1.13-Release; v1.12.8 waere ein Rueckschritt hinter
-# ADR 0010). Gefixt erst mit Go 1.26.9 / 1.27.2 bzw. x/net 0.60.0, mit dem
-# tofu noch nicht gebaut ist. Beim naechsten TOFU_VERSION-Sprung streichen.
-#
-# Go net/http (stdlib): DoS ueber einen Range-Header mit vielen kleinen
-# Bereichen. Betrifft HTTP-Server (FileServer, ServeContent); tofu liefert
-# keine Dateien per HTTP aus.
-CVE-2026-78667
-# Go crypto/tls (stdlib): Speichererschoepfung durch einen ClientHello mit
-# mehrfachen ECH-Outer-Extensions. Betrifft TLS-Server; tofu ist nur Client.
-CVE-2026-97031
-# HTTP/2 (stdlib und golang.org/x/net): ein Peer kann mit vielen SETTINGS-
-# Frames CPU binden, Client wie Server. tofu spricht als Client nur mit der
-# konfigurierten OpenStack-API und den Provider-Registries ueber TLS. Ein
-# boesartiger Peer dort koennte einen Deploy bis zum apply-Limit des workers
-# (30 min) aufhalten - nicht mehr. Restrisiko bewusst in Kauf genommen.
+# HTTP/2 in golang.org/x/net (fixed in 0.60.0), tofu bringt v0.57.0 mit;
+# der stdlib-Teil ist seit Go 1.27.2 behoben. Ein Peer kann mit vielen
+# SETTINGS-Frames CPU binden, Client wie Server. tofu spricht als Client nur
+# mit der konfigurierten OpenStack-API und den Provider-Registries über TLS.
+# Ein bösartiger Peer dort könnte einen Deploy bis zum apply-Limit des
+# workers (30 min) aufhalten - nicht mehr. Restrisiko bewusst in Kauf
+# genommen.
 CVE-2026-78669

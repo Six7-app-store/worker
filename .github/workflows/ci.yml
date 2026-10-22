@@ -1,11 +1,13 @@
 name: Worker CI/CD
 
 on:
+  # main ist Produktion, develop wird Staging (deployment #27, ADR 0013).
+  # Beide bauen und pushen ihr Image; PRs gegen beide werden geprueft.
   push:
-    branches: [main]
+    branches: [main, develop]
     tags: ['v*.*.*']
   pull_request:
-    branches: [main]
+    branches: [main, develop]
   # Von Hand auslösbar. Ohne diesen Trigger lässt sich die Pipeline nur
   # durch einen Commit starten — für eine Vorführung oder nach einem
   # behobenen Infrastrukturproblem ist das unnötig umständlich.
@@ -331,8 +333,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest = Produktion (main), develop = Staging. Nicht an
+          # {{is_default_branch}} haengen: Standardbranch ist develop, und
+          # Produktion zoege sonst den Staging-Stand.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
             type=sha,prefix=sha-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -410,13 +416,17 @@ jobs:
           category: trivy-image
 
   # ================================================================
-  # 📦 PUSH — only on main
+  # 📦 PUSH — main (Produktion) und develop (Staging)
   # ================================================================
   push:
     name: "📦 Push"
     runs-on: ubuntu-latest
     needs: [build, image-scan]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Auch beim manuellen Lauf: der ist laut Kommentar oben fuer "nach einem
+    # behobenen Infrastrukturproblem" da - ohne Push zoege der folgende
+    # Staging-Deploy aber wieder das alte Image. Gesehen am 14.10.2026, als
+    # Actions nach einem Merge keinen push-Lauf gestartet hatte.
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
       packages: write
@@ -443,8 +453,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest = Produktion (main), develop = Staging. Nicht an
+          # {{is_default_branch}} haengen: Standardbranch ist develop, und
+          # Produktion zoege sonst den Staging-Stand.
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=develop,enable=${{ github.ref == 'refs/heads/develop' }}
             type=sha,prefix=sha-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
