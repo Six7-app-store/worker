@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import shutil
+import tempfile
 from typing import Any
 
 import git
@@ -203,6 +205,7 @@ PHASE_CLEANUP = "CLEANUP"
 # than reusing TOFU_DESTROY.
 PHASE_SERVER_STOP = "SERVER_STOP"
 PHASE_SERVER_START = "SERVER_START"
+PHASE_SERVER_REBOOT = "SERVER_REBOOT"
 
 _PHASES_DEPLOY = (
     PHASE_STARTING,
@@ -263,6 +266,16 @@ _PHASES_RESUME = (
     PHASE_CREDS_MATERIALISE,
     PHASE_TOFU_INIT,
     PHASE_SERVER_START,
+    PHASE_CLEANUP,
+)
+# Per-VM reboot needs neither the repo nor tofu: the backend already
+# resolved the server id from the cached state. Only credentials, the
+# reboot itself and the clouds.yaml shred remain.
+_PHASES_REBOOT = (
+    PHASE_STARTING,
+    PHASE_OPENSTACK_SETUP,
+    PHASE_CREDS_MATERIALISE,
+    PHASE_SERVER_REBOOT,
     PHASE_CLEANUP,
 )
 
@@ -1651,3 +1664,132 @@ def redeploy_resource(
 
     finally:
         _cleanup_task_resources(clouds_config, repo_path, task_logger)
+
+
+# ----------------------------------------------------------------
+# REBOOT ONE RESOURCE
+# ----------------------------------------------------------------
+#
+# Hard-reboot exactly one compute instance via
+# ``openstack server reboot --hard --wait``. Disk, IPs and the tofu
+# state stay as they are; every other VM of the deployment is
+# untouched. The backend whitelists the address against the cached TF
+# state and hands over the matching server id, so this task needs no
+# git clone and no ``tofu init``.
+
+# An OpenStack server id is a UUID. The leading alphanumeric keeps a
+# value like ``--all-projects`` from being read as a CLI option.
+_SERVER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*$")
+
+
+@celery_app.task(bind=True, name="tasks.reboot_resource")
+def reboot_resource(
+    self,
+    deployment_id: str,
+    app_id: str,
+    app_git_link: str,
+    release: str,
+    user_vars: dict[str, Any],
+    teams: dict[str, list] = None,
+    openstack_envelope: dict[str, Any] | None = None,
+    resource_address: str | None = None,
+    server_id: str | None = None,
+):
+    """Hard-reboot ONE compute instance.
+
+    Args mirror ``redeploy_resource`` so the backend's
+    ``_dispatch_lifecycle_task`` can ship the same payload, plus
+    ``server_id`` — the OpenStack id of the instance behind
+    ``resource_address``. ``app_git_link``, ``release``, ``user_vars``
+    and ``teams`` are accepted for that parity but not used.
+
+    Returns the same payload shape as deploy/destroy so the celery
+    event listener stays generic. ``tf_state`` is ``None``: a reboot
+    doesn't change the state, the listener keeps the previous one.
+    """
+    task_logger = get_logger(f"reboot:{deployment_id}", correlation_id=deployment_id)
+
+    bound_task = self
+
+    def _emit(event_name: str, payload: dict[str, Any]) -> None:
+        bound_task.send_event(event_name, deployment_id=deployment_id, **payload)
+
+    task_logger.set_event_emitter(_emit)
+    phase_tracker = _PhaseTracker(task_logger, _PHASES_REBOOT)
+
+    work_dir: str | None = None
+    clouds_config: PerTaskCloudsConfig | None = None
+
+    try:
+        if not resource_address or not _REDEPLOY_ADDRESS_RE.match(resource_address):
+            raise Exception(f"reboot_resource called with invalid resource_address: {resource_address!r}")
+        if not server_id or not _SERVER_ID_RE.match(server_id):
+            raise Exception(f"reboot_resource called with invalid server_id: {server_id!r}")
+
+        phase_tracker.mark(PHASE_STARTING, f"Starting reboot of {resource_address}")
+        task_logger.resource_info(
+            "deployment",
+            deployment_id,
+            app_id=app_id,
+            action="reboot",
+            resource_address=resource_address,
+            server_id=server_id,
+        )
+
+        phase_tracker.mark(PHASE_OPENSTACK_SETUP, "Validating OpenStack credentials")
+        if not openstack_envelope:
+            raise Exception("OpenStack credential envelope missing — cannot reboot without credentials")
+        task_logger.success("OpenStack credential envelope received", category=LogCategory.STATUS)
+
+        phase_tracker.mark(PHASE_CREDS_MATERIALISE, "Writing per-task clouds.yaml")
+        work_dir = tempfile.mkdtemp(prefix=f"reboot-{deployment_id}-")
+        clouds_config = PerTaskCloudsConfig(openstack_envelope, work_dir=work_dir)
+        openstack_env = clouds_config.__enter__()
+        task_logger.success("Per-task clouds.yaml written", category=LogCategory.STATUS)
+
+        phase_tracker.mark(PHASE_SERVER_REBOOT, f"Rebooting {resource_address}")
+        openstack_service = OpenStackService(env_vars=openstack_env)
+        # Purely cosmetic pre-flight, as in pause/resume: name and power
+        # state make the log readable. Never fails the task.
+        info = openstack_service.server_show(server_id)
+        label_str = info.get("name", server_id) if info else server_id
+        task_logger.info(
+            f"reboot {label_str} (status: {(info or {}).get('status') or 'unknown'})",
+            category=LogCategory.OPERATION,
+            server_id=server_id,
+        )
+        ok, err = openstack_service.server_reboot(server_id)
+        if not ok:
+            raise Exception(f"Reboot of {label_str} failed: {err}")
+        task_logger.success(f"{label_str}: reboot OK, server is ACTIVE again", category=LogCategory.STATUS)
+
+        phase_tracker.mark(PHASE_CLEANUP, "Cleaning up")
+        task_logger.success(
+            f"Deployment {deployment_id} reboot of {resource_address} completed",
+            category=LogCategory.STATUS,
+        )
+
+        return {
+            "status": "success",
+            "deployment_id": deployment_id,
+            "logs": task_logger.get_logs_dict(),
+            "tf_state": None,
+            "commit_info": None,
+            "tofu_outputs": {},
+        }
+
+    except Exception as e:
+        task_logger.exception(f"Reboot failed: {str(e)}", exception=e, deployment_id=deployment_id)
+        raise Failure(
+            message=str(e),
+            deployment_id=deployment_id,
+            logs_dict=task_logger.get_logs_dict(),
+            tf_state=None,
+            commit_info=None,
+            tofu_outputs={},
+        )
+
+    finally:
+        _cleanup_task_resources(clouds_config, None, task_logger)
+        if work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)

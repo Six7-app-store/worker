@@ -122,6 +122,26 @@ class OpenStackService:
             return (True, None)
         return (False, stderr.strip() or "openstack server start failed")
 
+    def server_reboot(self, server_id: str) -> tuple[bool, str | None]:
+        """Hard-reboot an OpenStack compute instance and wait for ACTIVE.
+
+        ``--hard`` because the use case is a hung or crashed guest that
+        no longer reacts to the ACPI signal of a soft reboot; Nova also
+        accepts a hard reboot from SHUTOFF and ERROR. ``--wait`` blocks
+        until the server is ACTIVE again, so a success here means the
+        VM is back up, not just that the request was accepted.
+
+        Returns ``(True, None)`` on success, ``(False, stderr)`` on
+        failure.
+        """
+        rc, _stdout, stderr = self._run(
+            ["openstack", "server", "reboot", "--hard", "--wait", server_id],
+            timeout=600,
+        )
+        if rc == 0:
+            return (True, None)
+        return (False, stderr.strip() or "openstack server reboot failed")
+
     # ------------------------------------------------------------------
     # Console (used to wait for cloud-init after deploy)
     # ------------------------------------------------------------------

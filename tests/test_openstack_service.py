@@ -279,6 +279,45 @@ class TestServerStart:
 
 
 @pytest.mark.unit
+class TestServerReboot:
+    """Tests for the server_reboot wrapper."""
+
+    def test_returns_success_when_rc_zero(self, service, mocker):
+        """Returns (True, None) when reboot exits 0."""
+        mocker.patch(
+            "app.services.openstack_service.subprocess.run",
+            return_value=_CompletedStub(returncode=0, stdout="", stderr=""),
+        )
+        assert service.server_reboot("srv-1") == (True, None)
+
+    def test_returns_stderr_stripped_on_failure(self, service, mocker):
+        """Returns (False, stripped stderr) when reboot exits non-zero."""
+        mocker.patch(
+            "app.services.openstack_service.subprocess.run",
+            return_value=_CompletedStub(returncode=1, stdout="", stderr="\nInstance is locked\n"),
+        )
+        assert service.server_reboot("srv-1") == (False, "Instance is locked")
+
+    def test_returns_default_message_when_stderr_empty(self, service, mocker):
+        """Returns a helpful default message when reboot fails with empty stderr."""
+        mocker.patch(
+            "app.services.openstack_service.subprocess.run",
+            return_value=_CompletedStub(returncode=1, stdout="", stderr=""),
+        )
+        assert service.server_reboot("srv-1") == (False, "openstack server reboot failed")
+
+    def test_invokes_cli_with_hard_wait_and_long_timeout(self, service, mocker):
+        """Hard reboot of exactly this server, waiting until it is ACTIVE again."""
+        mock_sp = mocker.patch(
+            "app.services.openstack_service.subprocess.run",
+            return_value=_CompletedStub(returncode=0, stdout="", stderr=""),
+        )
+        service.server_reboot("srv-1")
+        assert mock_sp.call_args.args[0] == ["openstack", "server", "reboot", "--hard", "--wait", "srv-1"]
+        assert mock_sp.call_args.kwargs["timeout"] == 600
+
+
+@pytest.mark.unit
 class TestServerConsoleLog:
     """Tests for the server_console_log wrapper (waiting on cloud-init)."""
 

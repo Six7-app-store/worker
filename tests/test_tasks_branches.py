@@ -31,6 +31,7 @@ from app.tasks import (
     destroy_deployment,
     encode_tofu_vars,
     pause_deployment,
+    reboot_resource,
     redeploy_resource,
     resume_deployment,
 )
@@ -693,6 +694,91 @@ class TestRedeployResource:
                 resource_address="; rm -rf /",
             )
         assert "invalid resource_address" in str(exc.value)
+
+
+# --- reboot_resource --------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRebootResource:
+    """Per-VM reboot hits exactly one server and needs no repo or tofu."""
+
+    ADDR = 'openstack_compute_instance_v2.team_ide["Team-A"]'
+    SERVER_ID = "0b6f7c1e-2d4a-4b8e-9f3c-1a2b3c4d5e6f"
+
+    def _run(self, **overrides):
+        kwargs = {
+            "deployment_id": "dep-1",
+            "app_id": "myapp",
+            "app_git_link": "https://git/repo.git",
+            "release": "v1",
+            "user_vars": {"tofu": {}},
+            "teams": None,
+            "openstack_envelope": {"project_id": "p1"},
+            "resource_address": self.ADDR,
+            "server_id": self.SERVER_ID,
+        }
+        kwargs.update(overrides)
+        return reboot_resource.run(**kwargs)
+
+    def _openstack_mock(self, mocker, *, reboot=(True, None)):
+        svc = mocker.MagicMock()
+        svc.server_show.return_value = {"name": "online-ide-Team-A", "status": "ERROR"}
+        svc.server_reboot.return_value = reboot
+        mocker.patch("app.tasks.OpenStackService", return_value=svc)
+        return svc
+
+    def test_reboots_only_the_given_server(self, mocker):
+        """One reboot call for the given id; no clone, no tofu."""
+        _silence_events(mocker, reboot_resource)
+        _, cc = _make_clouds_config_mock(mocker)
+        svc = self._openstack_mock(mocker)
+        clone = mocker.patch("app.tasks.git_service.clone_release")
+        tofu = mocker.patch("app.tasks.TofuExecutor")
+
+        result = self._run()
+
+        assert result["status"] == "success"
+        assert result["tf_state"] is None
+        svc.server_reboot.assert_called_once_with(self.SERVER_ID)
+        clone.assert_not_called()
+        tofu.assert_not_called()
+        cc.__exit__.assert_called_once()
+
+    def test_reboot_failure_raises_failure_with_reason(self, mocker):
+        _silence_events(mocker, reboot_resource)
+        _, cc = _make_clouds_config_mock(mocker)
+        self._openstack_mock(mocker, reboot=(False, "Instance is locked"))
+
+        with pytest.raises(Failure) as exc:
+            self._run()
+        assert "Instance is locked" in str(exc.value)
+        cc.__exit__.assert_called_once()
+
+    @pytest.mark.parametrize("server_id", [None, "", "--all-projects", "a b"])
+    def test_invalid_server_id_short_circuits(self, mocker, server_id):
+        _silence_events(mocker, reboot_resource)
+        svc = self._openstack_mock(mocker)
+        with pytest.raises(Failure) as exc:
+            self._run(server_id=server_id)
+        assert "invalid server_id" in str(exc.value)
+        svc.server_reboot.assert_not_called()
+
+    def test_invalid_address_short_circuits(self, mocker):
+        _silence_events(mocker, reboot_resource)
+        svc = self._openstack_mock(mocker)
+        with pytest.raises(Failure) as exc:
+            self._run(resource_address="; rm -rf /")
+        assert "invalid resource_address" in str(exc.value)
+        svc.server_reboot.assert_not_called()
+
+    def test_missing_envelope_fails(self, mocker):
+        _silence_events(mocker, reboot_resource)
+        svc = self._openstack_mock(mocker)
+        with pytest.raises(Failure) as exc:
+            self._run(openstack_envelope=None)
+        assert "credential envelope missing" in str(exc.value)
+        svc.server_reboot.assert_not_called()
 
 
 # --- state / output collection ----------------------------------------------

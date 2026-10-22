@@ -434,8 +434,13 @@ class StructuredLogger:
         Do NOT put a ``timestamp`` field in the payload: Celery injects one
         itself (as a Unix-time float) and would crash on an ISO string.
         Pass the ISO time as ``iso_timestamp`` if needed downstream.
+
+        ``progress_pct`` counts the phases already *finished*: the event
+        fires when phase ``idx`` starts, so ``idx - 1`` are done. Counting
+        the starting phase as done showed 100 % for the whole last phase —
+        VM_SETUP, which waits up to 90 minutes for cloud-init.
         """
-        pct = max(0, min(100, round((idx / max(total, 1)) * 100)))
+        pct = max(0, min(100, round(((idx - 1) / max(total, 1)) * 100)))
         if self._event_emitter is not None:
             payload: dict[str, Any] = {
                 "phase": phase_name,

@@ -368,10 +368,11 @@ class TestStructuredLoggerProgress:
         """progress() emits a PROGRESS event with progress_pct clamped to 0..100."""
         events: list[tuple[str, dict[str, Any]]] = []
         log = StructuredLogger("p", console=False, event_emitter=lambda n, p: events.append((n, p)))
-        log.progress("phase1", 2, 4, "halfway")
+        log.progress("phase1", 3, 4, "halfway")
         assert len(events) == 1
         name, payload = events[0]
         assert name == StructuredLogger.PROGRESS_EVENT_NAME
+        # Phase 3 of 4 starts → 2 of 4 finished.
         assert payload["progress_pct"] == 50
         assert payload["message"] == "halfway"
         assert payload["phase"] == "phase1"
@@ -384,6 +385,14 @@ class TestStructuredLoggerProgress:
         log = StructuredLogger("p", console=False, event_emitter=lambda n, p: events.append((n, p)))
         log.progress("phase1", 10, 5)
         assert events[0][1]["progress_pct"] == 100
+
+    def test_progress_last_phase_is_not_reported_as_done(self):
+        """Starting the last phase (e.g. VM_SETUP 9/9) must stay below 100 %."""
+        events: list[tuple[str, dict[str, Any]]] = []
+        log = StructuredLogger("p", console=False, event_emitter=lambda n, p: events.append((n, p)))
+        log.progress("phase1", 1, 9)
+        log.progress("VM_SETUP", 9, 9)
+        assert [e[1]["progress_pct"] for e in events] == [0, 89]
 
     def test_progress_with_zero_total_does_not_divide_by_zero(self):
         """progress() handles total=0 without raising."""
