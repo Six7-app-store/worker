@@ -1,14 +1,15 @@
 name: CD - Staging-Deploy anstossen
 
 # Schliesst die Luecke zwischen Merge und Staging: sobald die CI auf `develop`
-# durch ist und das neue Image `:develop` in GHCR liegt, stoesst dieser
-# Workflow im deployment-Repository den Neuaufbau des Stacks an. develop ist
-# Staging, main ist Produktion (ADR 0013) - ein Merge auf main loest hier
-# nichts aus.
+# oder `main` durch ist und das neue Image in GHCR liegt, stoesst dieser
+# Workflow im deployment-Repository den Neuaufbau des passenden Stands an.
+# Jeder Branch hat dort seinen eigenen Stand (deployment ADR 0014): develop
+# zieht `:develop`, main zieht `:latest`. Welcher gemeint ist, steht in
+# client_payload.ref.
 #
-# Der Timer auf der Staging-VM zieht `:develop` ohnehin alle 5 Minuten nach.
-# Der Neuaufbau hier ist trotzdem noetig: der Timer tauscht nur Container,
-# erst der Neuaufbau bringt die VM in den Zustand, den deployment beschreibt.
+# Der Timer auf den VMs zieht neue Images ohnehin alle 5 Minuten nach. Der
+# Neuaufbau hier ist trotzdem noetig: der Timer tauscht nur Container, erst
+# der Neuaufbau bringt die VM in den Zustand, den deployment beschreibt.
 #
 # Warum der Umweg ueber das deployment-Repository: der Deploy braucht die
 # OpenStack-API der DHBW, und die ist von ausserhalb des Campusnetzes nicht
@@ -28,7 +29,7 @@ on:
   workflow_run:
     workflows: ["Worker CI/CD"]
     types: [completed]
-    branches: [develop]
+    branches: [develop, main]
 
   # Von Hand, wenn ein Deploy ohne neuen Commit noetig ist.
   workflow_dispatch:
@@ -49,7 +50,11 @@ jobs:
     # Nur bei gruener CI. Ohne diese Zeile liefe der Deploy auch nach einem
     # fehlgeschlagenen Lauf - workflow_run feuert bei jedem Ende, nicht nur
     # bei Erfolg.
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # Und nur nach einem Push oder einem CI-Lauf von Hand - beide schieben ein
+    # Image. workflow_run filtert allein nach dem Branchnamen,
+    # ein Pull Request aus einem Fork mit einem Branch namens main oder develop
+    # passte sonst ebenfalls.
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -69,12 +74,16 @@ jobs:
           TOKEN: ${{ secrets.CROSS_REPO_PAT }}
           SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           MESSAGE: ${{ github.event.workflow_run.head_commit.message || 'manuell ausgeloest' }}
+          # Der Branch, auf dem gemergt wurde - nicht github.ref. Bei
+          # workflow_run ist github.ref immer der Standardbranch (develop), ein
+          # Merge auf main kaeme sonst als develop an.
+          BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
         run: |
           set -euo pipefail
           # --retry faengt die Faelle ab, in denen GitHub kurz klemmt.
           # Ausgegeben wird nur der Statuscode: die Antwort koennte sonst
           # Kopfzeilen ins oeffentliche Log tragen.
-          payload=$(jq -nc             --arg repo "${{ github.repository }}"             --arg sha "$SHA"             --arg ref "${{ github.ref }}"             --arg msg "$(printf '%s' "$MESSAGE" | head -1)"             '{event_type:"trigger-deployment",client_payload:{repository:$repo,sha:$sha,ref:$ref,message:$msg}}')
+          payload=$(jq -nc             --arg repo "${{ github.repository }}"             --arg sha "$SHA"             --arg ref "refs/heads/$BRANCH"             --arg msg "$(printf '%s' "$MESSAGE" | head -1)"             '{event_type:"trigger-deployment",client_payload:{repository:$repo,sha:$sha,ref:$ref,message:$msg}}')
 
           code=$(curl -sS -o /dev/null -w '%{http_code}'             --retry 3 --retry-connrefused --retry-delay 5 --max-time 30             -X POST             -H "Authorization: Bearer $TOKEN"             -H "Accept: application/vnd.github+json"             -H "X-GitHub-Api-Version: 2022-11-28"             -d "$payload"             https://api.github.com/repos/${{ github.repository_owner }}/deployment/dispatches)
 
