@@ -142,9 +142,8 @@ REPOS = {
         "tests": ["frontend-dev", "sh", "-lc", "cd /app && npx vitest --run"],
         "needs": (),
     },
-    # deployment läuft nicht im Container: das Gate ist OpenTofu (und für
-    # die Übergangsinsel infrastructure/terraform noch Terraform) am Host,
-    # dazu der Doku-Check.
+    # deployment läuft nicht im Container: das Gate ist OpenTofu am Host
+    # (sonst über Docker), dazu der Doku-Check.
     "deployment": {
         "container": None,
         "format": [],
@@ -159,11 +158,10 @@ REPOS = {
 # GitHub-Forks von DHBW-AppStore; ohne -R waehlt gh das Original.
 GH_OWNER = "Six7-app-store"
 
-# Fallback, wenn tofu/terraform nicht am Host liegen: dieselbe Version wie
-# in der CI (infra-qa.yml, staging.yml).
+# Fallback, wenn tofu nicht am Host liegt: dieselbe Version wie in der CI
+# (infra-qa.yml, staging.yml).
 IAC_IMAGES = {
     "tofu": "ghcr.io/opentofu/opentofu:1.13.2",
-    "terraform": "hashicorp/terraform:1.9.8",
 }
 
 # Wer bewusst committet, obwohl die zugeordnete Doku unberuehrt ist,
@@ -931,26 +929,20 @@ def container_path(path: str, repo: str, root: str) -> str:
     return "/app/" + relative
 
 
-# Welcher IaC-Baum mit welchem Werkzeug gepflegt wird. infrastructure/tofu
-# ist OpenTofu (ADR 0010); infrastructure/terraform hält nur noch envs/moodle
-# und envs/forgejo und fällt weg, sobald die beiden umgezogen sind.
-IAC_TREES = (
-    ("tofu", "tofu"),
-    ("terraform", "terraform"),
-)
+# Welcher IaC-Baum mit welchem Werkzeug gepflegt wird. Seit ADR 0010 und
+# ADR 0019 gibt es nur noch infrastructure/tofu.
+IAC_TREES = (("tofu", "tofu"),)
 
 
 def iac_formatter(path: str):
     """Das fmt-Kommando für eine IaC-Datei, sonst None.
 
-    Die Endung entscheidet: Terraform liest keine .tofu-Dateien, und eine
-    .tf-Datei liegt nur noch in der Terraform-Übergangsinsel.
+    Die Endung entscheidet: OpenTofu liest .tofu-Dateien. Eine .tf-Datei gibt es
+    in dieser Plattform nicht mehr (ADR 0019).
     """
     posix = as_posix(path)
     if posix.endswith(".tofu"):
         return ["tofu", "fmt", path]
-    if posix.endswith((".tf", ".tfvars")):
-        return ["terraform", "fmt", path]
     return None
 
 
