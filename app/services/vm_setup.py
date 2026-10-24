@@ -12,6 +12,13 @@ worker can read with the per-task credentials it already holds:
 * ``[  OK  ] Finished cloud-final.service``   — setup done
 * ``[FAILED] Failed to start cloud-final.service`` — setup failed
 
+Not every system keeps writing systemd's status lines to the serial console.
+Kali stops once its login prompt is up, so after its reboot the
+``Finished`` line never comes. cloud-init's own closing line,
+``Cloud-init v. <version> finished at ...`` (the default ``final_message``),
+counts as done as well. It comes before systemd's verdict, so a failure
+printed after it still wins.
+
 Pure decision logic (``classify_console``, ``error_lines``) is separate
 from the polling loop so both can be tested without a cloud.
 """
@@ -33,6 +40,7 @@ SetupState = Literal["running", "ready", "failed"]
 _ANSI = re.compile(r"\x1b?\[[0-9;]*m")
 
 _READY = "Finished cloud-final.service"
+_READY_CLOUD_INIT = re.compile(r"Cloud-init v\. \S+ finished at")
 _FAILED = "Failed to start cloud-final.service"
 _STARTING = "Starting cloud-final.service"
 # An app may reboot at the end of its setup (power_state). The marker
@@ -55,8 +63,9 @@ def _strip_ansi(text: str) -> str:
 def classify_console(text: str) -> SetupState:
     """The setup state a console log shows, judged by the latest marker."""
     clean = _strip_ansi(text)
+    cloud_init_done = [m.start() for m in _READY_CLOUD_INIT.finditer(clean)]
     positions = {
-        "ready": clean.rfind(_READY),
+        "ready": max([clean.rfind(_READY), *cloud_init_done]),
         "failed": clean.rfind(_FAILED),
         "running": max(clean.rfind(_STARTING), clean.rfind(_REBOOT)),
     }
