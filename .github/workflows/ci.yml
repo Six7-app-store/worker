@@ -353,6 +353,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+          # Neu je Lauf: die apt-upgrade-Schicht im Dockerfile kommt nie aus dem Cache.
+          build-args: APT_REFRESH=${{ github.run_id }}
           cache-to: type=gha,mode=max
 
   # ================================================================
@@ -387,6 +389,8 @@ jobs:
           platforms: linux/amd64
           tags: worker:scan
           cache-from: type=gha
+          # Neu je Lauf: die apt-upgrade-Schicht im Dockerfile kommt nie aus dem Cache.
+          build-args: APT_REFRESH=${{ github.run_id }}
 
       - name: Trivy image scan (gate)
         uses: aquasecurity/trivy-action@v0.36.0
@@ -473,6 +477,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+          # Neu je Lauf: die apt-upgrade-Schicht im Dockerfile kommt nie aus dem Cache.
+          build-args: APT_REFRESH=${{ github.run_id }}
           cache-to: type=gha,mode=max
 
 # Hier endet diese Datei, aber nicht die Pipeline.
