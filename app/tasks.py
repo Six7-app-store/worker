@@ -664,6 +664,9 @@ def deploy_application(
             tf_state = collect_tofu_state()
             outputs = collect_tofu_outputs()
 
+            # Before the cleanup below deletes them, together with the reason.
+            _log_failed_servers(openstack_env, tf_state, task_logger)
+
             # Best-effort cleanup: a half-finished `tofu apply` typically
             # leaves orphaned OpenStack resources (networks, ports, volumes)
             # that quietly eat the project's quota. Run destroy with the same
@@ -1007,6 +1010,41 @@ def _wait_for_vm_setup(openstack_env: dict[str, str], tf_state: str | None, task
         f"VM setup did not finish within {VM_SETUP_TIMEOUT_S // 60} minutes: {', '.join(outcome.pending)}. "
         "The VMs were kept for inspection."
     )
+
+
+def _log_failed_servers(openstack_env: dict[str, str], tf_state: str | None, task_logger: Any) -> None:
+    """Log Nova's fault message for every VM of the deployment in ERROR.
+
+    The OpenStack provider reports a failed build only as ``unexpected
+    state 'ERROR' ... last error: %!s(<nil>)``. The reason ("No valid host
+    was found", "Exceeded maximum number of retries", ...) is in the
+    server's ``fault`` field, and the cleanup destroy deletes the server
+    with it. Best effort: never raises, the deployment fails either way.
+    """
+    try:
+        server_ids = _extract_compute_instance_ids(tf_state)
+        if not server_ids:
+            return
+        service = OpenStackService(env_vars=openstack_env)
+        for server_id in server_ids:
+            server = service.server_show(server_id)
+            if not server or str(server.get("status", "")).upper() != "ERROR":
+                continue
+            fault = server.get("fault")
+            if isinstance(fault, dict):
+                reason = fault.get("message") or "no fault message"
+                code = fault.get("code")
+            else:
+                reason = str(fault) if fault else "no fault message"
+                code = None
+            task_logger.error(
+                f"VM {server.get('name') or server_id} ({server_id}) is in ERROR: {reason}",
+                category=LogCategory.ERROR,
+                server_id=server_id,
+                fault_code=code,
+            )
+    except Exception as e:  # noqa: BLE001 - diagnostics only
+        task_logger.warning(f"Could not read the fault of the failed VMs: {e}", category=LogCategory.WARNING)
 
 
 def _extract_compute_instance_ids(state_json: str | None) -> list[str]:
