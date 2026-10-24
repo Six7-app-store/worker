@@ -394,6 +394,116 @@ class TestDeployApplication:
         assert tofu_inst.destroy.called  # cleanup-after-failure
         assert tofu_inst.apply.called
 
+    def test_apply_failure_logs_nova_fault_before_cleanup(self, mocker, tmp_path):
+        """A VM in ERROR gets its fault message logged before destroy deletes it."""
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(repo_path)
+        _seed_tofu_dir(repo_path)
+
+        _silence_events(mocker, deploy_application)
+        _make_git_mock(mocker, repo_path)
+        _patch_git_repo(mocker)
+        _make_clouds_config_mock(mocker)
+        _, os_inst = _make_openstack_service_mock(mocker)
+        state = {
+            "resources": [
+                {"type": "openstack_compute_instance_v2", "instances": [{"attributes": {"id": "srv-1"}}]},
+            ]
+        }
+        _, tofu_inst = _make_tofu_executor_mock(mocker, apply_=False, state=json.dumps(state))
+
+        calls = []
+        os_inst.server_show.side_effect = lambda sid: calls.append("show") or {
+            "name": "kali-user-shared",
+            "status": "ERROR",
+            "fault": {"code": 500, "message": "No valid host was found. There are not enough hosts available."},
+        }
+        tofu_inst.destroy.side_effect = lambda **kw: calls.append("destroy") or (True, "", "")
+
+        with pytest.raises(Failure) as exc:
+            deploy_application.run(
+                deployment_id="dep-3",
+                app_id="myapp",
+                app_git_link="https://git/repo.git",
+                release="v1",
+                user_vars={"tofu": {}},
+                teams=None,
+                openstack_envelope={"project_id": "p1"},
+            )
+
+        assert calls == ["show", "destroy"]
+        messages = [entry["message"] for entry in exc.value.logs_dict]
+        assert (
+            "VM kali-user-shared (srv-1) is in ERROR: No valid host was found. There are not enough hosts available."
+            in messages
+        )
+
+    def test_apply_failure_skips_servers_that_are_not_in_error(self, mocker, tmp_path):
+        """An ACTIVE VM (apply failed elsewhere) adds no fault line."""
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(repo_path)
+        _seed_tofu_dir(repo_path)
+
+        _silence_events(mocker, deploy_application)
+        _make_git_mock(mocker, repo_path)
+        _patch_git_repo(mocker)
+        _make_clouds_config_mock(mocker)
+        _, os_inst = _make_openstack_service_mock(mocker)
+        state = {
+            "resources": [
+                {"type": "openstack_compute_instance_v2", "instances": [{"attributes": {"id": "srv-1"}}]},
+            ]
+        }
+        _make_tofu_executor_mock(mocker, apply_=False, state=json.dumps(state))
+
+        with pytest.raises(Failure) as exc:
+            deploy_application.run(
+                deployment_id="dep-4",
+                app_id="myapp",
+                app_git_link="https://git/repo.git",
+                release="v1",
+                user_vars={"tofu": {}},
+                teams=None,
+                openstack_envelope={"project_id": "p1"},
+            )
+
+        os_inst.server_show.assert_called_once_with("srv-1")
+        assert not any("is in ERROR" in entry["message"] for entry in exc.value.logs_dict)
+
+    def test_unreadable_fault_does_not_block_cleanup(self, mocker, tmp_path):
+        """A failing ``server show`` is only a warning; destroy still runs."""
+        repo_path = str(tmp_path / "repo")
+        os.makedirs(repo_path)
+        _seed_tofu_dir(repo_path)
+
+        _silence_events(mocker, deploy_application)
+        _make_git_mock(mocker, repo_path)
+        _patch_git_repo(mocker)
+        _make_clouds_config_mock(mocker)
+        _, os_inst = _make_openstack_service_mock(mocker)
+        state = {
+            "resources": [
+                {"type": "openstack_compute_instance_v2", "instances": [{"attributes": {"id": "srv-1"}}]},
+            ]
+        }
+        _, tofu_inst = _make_tofu_executor_mock(mocker, apply_=False, state=json.dumps(state))
+        os_inst.server_show.side_effect = RuntimeError("cli exploded")
+
+        with pytest.raises(Failure) as exc:
+            deploy_application.run(
+                deployment_id="dep-5",
+                app_id="myapp",
+                app_git_link="https://git/repo.git",
+                release="v1",
+                user_vars={"tofu": {}},
+                teams=None,
+                openstack_envelope={"project_id": "p1"},
+            )
+
+        assert tofu_inst.destroy.called
+        assert "OpenTofu apply failed" in str(exc.value)
+        assert any("Could not read the fault" in entry["message"] for entry in exc.value.logs_dict)
+
     def test_missing_envelope_raises_failure(self, mocker, tmp_path):
         """No ``openstack_envelope`` short-circuits with a Failure exception."""
         _silence_events(mocker, deploy_application)
