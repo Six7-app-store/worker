@@ -45,6 +45,12 @@ WORKDIR /app
 # push on any HIGH/CRITICAL OS finding, so even though it enlarges the
 # layer slightly we'd rather take the bytes than burn a .trivyignore
 # line every time upstream debian releases a CVE-fix.
+#
+# CI passes a new APT_REFRESH on every run, so this layer never comes
+# from the build cache. A cached layer keeps the packages of the day it
+# was first built, and Trivy then blocks on a fix that is already
+# released (libbrotli1, CVE-2026-111497, 24.10.2026).
+ARG APT_REFRESH=local
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     git \
     wget \

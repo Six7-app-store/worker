@@ -39,6 +39,9 @@ nicht im `PATH` — ein blankes `pytest` scheitert mit `No module named pytest`.
 - `ruff check .`, `black --check .`, `isort --check-only .` und `pytest` grün
 - Coverage nicht gesunken (`fail_under` in `pyproject.toml`)
 - Architekturentscheidung getroffen? ADR unter `deployment/docs/adr/`
+- Doku und Diagramme in `deployment/docs/` nachgezogen, wo `deployment/harness/doc-map.json` sie diesem Code zuordnet (Skill
+  `doku-nachziehen`). Das Commit-Gate fährt davor Doku-Zuordnung, Lint und
+  Tests im Container — der Stack muss laufen (ADR 0017)
 
 ## Nicht anfassen
 

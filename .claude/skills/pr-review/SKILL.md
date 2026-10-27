@@ -37,7 +37,10 @@ mehrere Repos gilt jede Liste für ihren Teil.
 | Auth-Header von Hand | `Authorization` irgendwo außerhalb von `src/api/axios.ts` |
 | Neue Env-Variable halb gepflegt | in einer Compose-Datei, aber nicht in `.env.example` — oder umgekehrt |
 | Harness geändert ohne Sync | `deployment/harness/*` im Diff, die erzeugten `.claude/`-Kopien aber nicht — `make harness-sync` fehlt |
-| Terraform unformatiert | `terraform fmt -check -recursive infrastructure/terraform` rot |
+| OpenTofu unformatiert | `tofu fmt -check -recursive infrastructure/tofu` rot |
+| Doku nicht nachgezogen | Pfad aus `deployment/harness/doc-map.json` geändert, zugeordnete Doku nicht, und kein `Doku-geprueft: <Grund>` in der Commit-Nachricht. Oder: der Grund trägt nicht |
+| Doku-Check rot | `make docs-check` im deployment-Repo: Links, ADR-Verzeichnis, Diagramme |
+| Kein Issue-Bezug | PR zu einer Story nennt das Issue nicht (`Teil von Six7-app-store/deployment#N`) |
 | Secret im Diff | Werte in `.env`-Form, `-----BEGIN`, Tokens, Passwörter im Klartext |
 | Test fehlt | neuer Endpunkt/Task ohne Erfolgs- **und** Verweigerungsfall |
 | ADR fehlt | Entscheidung getroffen, die teuer zurückzunehmen ist → `deployment/docs/adr/` |

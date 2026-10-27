@@ -38,6 +38,18 @@ FAILED_VIA_API = (
     "[[0;1;31mFAILED[0m] Failed to start [0;1;39mcloud-final.service[0m - Cloud-init: Final Stage.\n"
 )
 
+# Kali after its reboot (staging, 24.10.2026): systemd stops writing status
+# lines once the login prompt is on the serial console, so no "Finished"
+# line follows cloud-init's own closing line.
+KALI_SECOND_BOOT = (
+    "[[0;32m  OK  [0m] Started [0;1;39mssh.service[0m - OpenBSD Secure Shell server.\n"
+    "Kali GNU/Linux Rolling kali ttyS0\n"
+    "kali login: [  186.70] kali-app-ipv6[838]: kali-app-ipv6: globale IPv6 jetzt vorhanden\n"
+    "[  187.14] cloud-init[442]: Cloud-init v. 26.2 running 'modules:final' at Sat, 24 Oct 2026 17:05:44 +0000.\n"
+    "[  187.16] cloud-init[442]: Cloud-init v. 26.2 finished at Sat, 24 Oct 2026 17:05:44 +0000. Up 187.16 seconds.\n"
+    "[  187.16] cloud-init[442]: Kali-App: Teams: Team #1, Nutzer: 3\n"
+)
+
 
 @pytest.mark.unit
 class TestClassifyConsole:
@@ -68,6 +80,21 @@ class TestClassifyConsole:
 
     def test_failed_without_esc_is_failed(self):
         assert classify_console(FAILED_VIA_API) == "failed"
+
+    def test_cloud_init_closing_line_is_ready_without_systemd_status(self):
+        assert classify_console(KALI_SECOND_BOOT) == "ready"
+
+    def test_kali_reboot_then_closing_line_is_ready(self):
+        assert classify_console(READY + "[  900.1] reboot: Restarting system\n" + KALI_SECOND_BOOT) == "ready"
+
+    def test_start_of_final_stage_alone_is_not_ready(self):
+        started = KALI_SECOND_BOOT.split("[  187.16]")[0]
+        assert classify_console(started) == "running"
+
+    def test_failure_after_closing_line_still_fails(self):
+        # cloud-init prints its closing line before systemd's verdict.
+        closing = "[  708.29] cloud-init[594]: Cloud-init v. 26.2 finished at Sat, 24 Oct 2026 17:05:44 +0000.\n"
+        assert classify_console(FAILED.replace("[\x1b[0;1;31mFAILED", closing + "[\x1b[0;1;31mFAILED")) == "failed"
 
     def test_error_lines_without_esc_are_readable(self):
         assert error_lines(FAILED_VIA_API)[-1].startswith("[FAILED] Failed to start cloud-final.service")
