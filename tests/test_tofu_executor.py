@@ -209,12 +209,13 @@ class TestStreamSubprocess:
 class TestGetEnv:
     """Verify _get_env merging rules for env_vars, extra_env, TF_LOG, PG_CONN_STR."""
 
-    def test_env_vars_layered_on_os_environ(self, mocker, tmp_path):
-        """env_vars merge on top of os.environ; os.environ keys still present."""
-        mocker.patch.dict(os.environ, {"FROM_OS": "yes"}, clear=False)
+    def test_platform_secrets_are_not_inherited(self, mocker, tmp_path):
+        """Only explicitly selected system variables reach OpenTofu."""
+        mocker.patch.dict(os.environ, {"CREDENTIAL_ENCRYPTION_KEY": "secret", "PATH": "/bin"})
         ex = TofuExecutor(str(tmp_path), env_vars={"CUSTOM": "v"})
         env = ex._get_env()
-        assert env["FROM_OS"] == "yes"
+        assert "CREDENTIAL_ENCRYPTION_KEY" not in env
+        assert env["PATH"] == "/bin"
         assert env["CUSTOM"] == "v"
 
     def test_extra_env_wins_over_env_vars(self, mocker, tmp_path):

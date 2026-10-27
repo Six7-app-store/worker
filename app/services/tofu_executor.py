@@ -147,7 +147,25 @@ class TofuExecutor:
 
     def _get_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
         """Get environment variables including OpenStack credentials and OpenTofu debug logging."""
-        env = os.environ.copy()
+        # Do not pass platform credentials (broker, encryption key, Git token)
+        # to providers and provisioners. This is defense in depth, not a sandbox.
+        inherited = (
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "TMPDIR",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "NO_PROXY",
+            "https_proxy",
+            "http_proxy",
+            "no_proxy",
+        )
+        env = {key: os.environ[key] for key in inherited if key in os.environ}
         env.update(self.env_vars)
         if extra_env:
             env.update(extra_env)

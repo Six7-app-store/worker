@@ -4,6 +4,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import git
 
@@ -41,17 +42,28 @@ class GitService:
 
     def _get_authenticated_url(self, git_url: str) -> str:
         """Convert Git URL to HTTPS format with token authentication."""
-        url = git_url
-        if url.startswith("git@"):
-            # Convert SSH to HTTPS: git@github.com:owner/repo.git -> https://token@github.com/owner/repo.git
-            url = url.replace(":", "/").replace("git@", f"https://{self.token}@")
-        elif url.startswith("https://"):
-            # Add token to HTTPS URL
-            parsed = self._parse_git_url(url)
-            if parsed:
-                url = f"https://{self.token}@{parsed['host']}/{parsed['owner']}/{parsed['repo']}.git"
-
-        return url
+        if git_url.startswith("git@"):
+            parsed = self._parse_git_url(git_url)
+            if not parsed:
+                raise ValueError("Invalid Git URL")
+            url = urlsplit(f"https://{parsed['host']}/{parsed['owner']}/{parsed['repo']}.git")
+        else:
+            url = urlsplit(git_url)
+        allowed = {host.strip().lower() for host in settings.GIT_ALLOWED_HOSTS}
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or url.hostname.lower() not in allowed
+            or url.username is not None
+            or url.password is not None
+            or url.port is not None
+            or url.query
+            or url.fragment
+            or not url.path.strip("/")
+        ):
+            raise ValueError("Git URL must use HTTPS and an allowed host")
+        credentials = f"{quote(self.token, safe='')}@" if self.token else ""
+        return f"https://{credentials}{url.hostname.lower()}{url.path}"
 
     def clone_release(self, git_url: str, tag: str, deployment_id: str) -> str:
         """
@@ -83,8 +95,19 @@ class GitService:
             logger.info(f"Branch/Tag: {tag}")
             logger.info("Mode: Shallow clone (depth=1, single branch)")
 
-            # Clone with --branch <tag> --depth 1 (no history, only the tag)
-            repo = git.Repo.clone_from(auth_url, str(repo_path), branch=tag, depth=1, single_branch=True)
+            if re.fullmatch(r"[0-9a-f]{40}", tag):
+                # Fetch the exact approved commit. Never fall back to a mutable
+                # tag if the server no longer offers that object.
+                repo = git.Repo.init(repo_path)
+                origin = repo.create_remote("origin", auth_url)
+                origin.fetch(tag, depth=1)
+                repo.git.checkout("--detach", "FETCH_HEAD")
+                if repo.head.commit.hexsha != tag:
+                    raise ValueError("Fetched commit does not match the approved commit")
+            else:
+                # Legacy deployments predate recorded commits and retain their
+                # original tag path so their resources can still be destroyed.
+                repo = git.Repo.clone_from(auth_url, str(repo_path), branch=tag, depth=1, single_branch=True)
 
             logger.info(f"✓ Repository cloned successfully to {repo_path}")
             logger.info(f"Current HEAD: {repo.head.commit.hexsha}")
@@ -92,7 +115,10 @@ class GitService:
             return str(repo_path)
 
         except git.exc.GitCommandError as e:
-            error_msg = f"Git command failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+            detail = str(e.stderr if hasattr(e, "stderr") else e)
+            if self.token:
+                detail = detail.replace(self.token, "[redacted]").replace(quote(self.token, safe=""), "[redacted]")
+            error_msg = f"Git command failed: {detail}"
             logger.error(error_msg)
             if repo_path.exists():
                 shutil.rmtree(repo_path)
