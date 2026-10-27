@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # Git
     GIT_ACCESS_TOKEN: str = ""
+    GIT_ALLOWED_HOSTS: list[str] = ["github.com", "gitlab.com"]
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -15,6 +15,7 @@ def git_service(tmp_path):
     with patch("app.services.git_service.settings") as mock_settings:
         mock_settings.TEMP_REPO_BASE_PATH = str(tmp_path)
         mock_settings.GIT_ACCESS_TOKEN = "test-token-123"
+        mock_settings.GIT_ALLOWED_HOSTS = ["github.com", "gitlab.com"]
         service = GitService()
         return service
 
@@ -85,6 +86,19 @@ class TestGitServiceAuthentication:
 
         assert result.startswith("https://")
         assert "@gitlab.com" in result
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com.attacker.example/owner/repo.git",
+            "https://github.com@attacker.example/owner/repo.git",
+            "https://attacker.example/owner/repo.git",
+            "http://github.com/owner/repo.git",
+        ],
+    )
+    def test_rejects_untrusted_hosts_before_attaching_token(self, git_service, url):
+        with pytest.raises(ValueError):
+            git_service._get_authenticated_url(url)
 
 
 class TestGitServiceCloning:
@@ -246,14 +260,17 @@ class TestGitServiceIntegration:
     Kein Netzzugriff: das Gegenstueck ist ein lokal angelegtes Repository,
     das ueber eine ``file://``-URL geklont wird. Die URL-Form ist nicht
     beliebig - bei einem reinen Pfad-Klon ignoriert git ``--depth``, der
-    Shallow-Clone waere dann ungeprueft. ``_get_authenticated_url`` laesst
-    ``file://`` unangetastet, weil es weder mit ``git@`` noch mit
-    ``https://`` beginnt.
+    Shallow-Clone waere dann ungeprueft. Die URL-Pruefung wird nur in
+    diesen lokalen Integrationstests ersetzt und separat oben getestet.
 
     Diese Lane lief zuvor leer: sie enthielt einen einzigen, mit
     ``skip`` markierten Platzhalter, wodurch der Coverage-Wert des Laufs
     auf 0 fiel und das Gate den Job kippte.
     """
+
+    @pytest.fixture(autouse=True)
+    def local_transport(self, monkeypatch):
+        monkeypatch.setattr(GitService, "_get_authenticated_url", lambda _self, url: url)
 
     def test_clone_release_checks_out_the_tag_not_head(self, git_service, source_repo, tmp_path):
         """Der Tag zeigt auf den ersten Commit, HEAD auf den zweiten."""
@@ -267,6 +284,15 @@ class TestGitServiceIntegration:
         path = git_service.clone_release(source_repo.as_uri(), "v1.0.0", "int-shallow")
 
         assert len(list(git.Repo(path).iter_commits())) == 1
+
+    def test_pinned_commit_is_unaffected_by_a_moved_tag(self, git_service, source_repo):
+        repo = git.Repo(source_repo)
+        original = repo.commit("v1.0.0").hexsha
+        repo.delete_tag("v1.0.0")
+        repo.create_tag("v1.0.0", repo.head.commit)
+        path = git_service.clone_release(source_repo.as_uri(), original, "pinned")
+        assert git.Repo(path).head.commit.hexsha == original
+        assert (Path(path) / "version.txt").read_text() == "v1\n"
 
     def test_clone_release_replaces_an_existing_checkout(self, git_service, source_repo):
         """Ein zweiter Lauf raeumt den alten Stand weg, statt ihn zu mischen."""
