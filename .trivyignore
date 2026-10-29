@@ -15,7 +15,7 @@ AVD-DS-0002
 
 # OpenTofu upstream CVE backlog. Gemessen am Produktions-Image mit
 # OpenTofu v1.13.2 (neuestes Release, 21.10.2026, gebaut mit Go 1.27.3);
-# Trivy meldet am tofu-Binary genau diese vier HIGH-Befunde. Kein
+# Trivy meldet am tofu-Binary genau diese fünf HIGH-Befunde. Kein
 # veröffentlichter Build behebt sie. Beim nächsten TOFU_VERSION-Sprung neu
 # scannen und alles streichen, was dann sauber ist — nicht mitschleppen.
 # (Mit v1.13.2 gestrichen: CVE-2026-78667 und CVE-2026-97031, beide stdlib,
@@ -40,3 +40,9 @@ CVE-2026-84445
 # workers (30 min) aufhalten - nicht mehr. Restrisiko bewusst in Kauf
 # genommen.
 CVE-2026-78669
+# github.com/go-jose/go-jose/v4 (fixed in 4.1.6), tofu bringt v4.1.4 mit:
+# Denial of Service beim Parsen von JWKs mit RSA-Schlüsseln. Nachgemeldet am
+# 29.10.2026, gleiches Binary v1.13.2. Der worker nutzt das pg-Backend und
+# authentifiziert über Keystone (clouds.yaml); beides arbeitet ohne JWKs.
+# Schlimmstenfalls hängt ein Deploy bis zum apply-Limit (30 min).
+CVE-2026-116587

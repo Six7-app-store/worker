@@ -1,6 +1,6 @@
 ---
 name: adr-schreiben
-description: Wann ein Architecture Decision Record fällig ist und wie er aussieht — Format, Nummernvergabe, und die Regel, dass ein ADR nie nachträglich geändert wird.
+description: Wann ein Architecture Decision Record fällig ist und wie er aussieht — Format, Nummernvergabe, und die Regel, dass ein ADR nachträglich nur als gekennzeichnete Korrektur geändert wird.
 ---
 
 # ADR schreiben
@@ -80,6 +80,13 @@ Ein ADR wird nach dem Schreiben **nicht mehr bearbeitet**. Ändert sich die
 Lage, entsteht ein neues, und das alte bekommt den Status „Abgelöst durch
 ADR-NNNN". Die Historie ist der Punkt an der Sache — ein nachträglich
 geglättetes ADR erzählt nur noch, was man heute denkt.
+
+**Ausnahme: Korrektur.** Steht in einem ADR etwas nachweislich Falsches, oder
+widerspricht es dem, was das Team tatsächlich lebt und ausdrücklich bestätigt,
+wird es korrigiert. Unter `**Beteiligt:**` kommt eine Zeile
+`**Korrigiert:** TT.MM.JJJJ — was und warum`; die alte Fassung bleibt in der
+Git-Historie. Ob ein Fall eine Korrektur ist, entscheidet eine Person, nicht
+der Agent. Eine geänderte Entscheidung ist nie eine Korrektur.
 
 ## Vorbild
 
