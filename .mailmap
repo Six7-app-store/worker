@@ -1,0 +1,19 @@
+# Fasst mehrere Git-Identitäten derselben Person zusammen (git shortlog, git blame, git log).
+# Format: Kanonischer Name <kanonische@mail> [Name im Commit] <mail im Commit>
+Ajun Anpalakan <ajun.anpalakan@heidelberg.com> <ajun.anpalakan@heidelberg.com>
+Jonas Thaddey <jonasthaddey@gmail.com> <jonasthaddey@gmail.com>
+Leon Priemer <leon.priemer@gmail.com> <151186408+Leon-Priemer@users.noreply.github.com>
+Luca Bäck <luca.baeck@sap.com> <luca.baeck@outlook.de>
+Luis Heider <luisheider2005@gmail.com> <luisheider2005@gmail.com>
+Luis Heider <luisheider2005@gmail.com> <108334290+Luminuzz@users.noreply.github.com>
+Max Meinel <max.meinel@gmx.net> <57808426+Max-Meinel@users.noreply.github.com>
+Monika Pjano <monika.pjano@evorait.com> <monika.pjano@evorait.com>
+Monika Pjano <monika.pjano@evorait.com> <root@Win-MonikaPjan.localdomain>
+Nico Becker <nico.becker@heidelberg.com> <nico.becker@heidelberg.com>
+Nico Becker <nico.becker@heidelberg.com> <Nico.becker@heidelberg.com>
+Okan Sönmez <okso2004@gmail.com> <77553707+okso-hub@users.noreply.github.com>
+Paulina <pcfrieda@web.de> <pcfrieda@web.de>
+Paulina <pcfrieda@web.de> <150272519+thispauli@users.noreply.github.com>
+Tom Weber <tom.weber@galileo-solutions.de> <tom.weber@galileo-solutions.de>
+Tom Weber <tom.weber@galileo-solutions.de> <tomweber@MacBook-Air-von-Tom-2.local>
+Tom Weber <tom.weber@galileo-solutions.de> <151944944+tomwbr650@users.noreply.github.com>
