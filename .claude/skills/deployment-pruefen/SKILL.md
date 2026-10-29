@@ -18,8 +18,8 @@ Seit ADR 0014 gibt es zwei Stände. Die Grenze läuft zwischen ihnen
 | Stand | Adresse | Agent |
 |---|---|---|
 | `develop` = Staging | `staging.<zone>` | **darf neu bauen**, ohne Rückfrage |
-| `main` = Produktionsstand | `appstore.<zone>` | nur lesen |
-| Produktion (`docker-compose.prod.yml`) | Zielmaschine | nur lesen |
+| `main` = Produktion | `appstore.<zone>` | nur lesen |
+| eigenständige Installation (`docker-compose.prod.yml`) | eigene VM, läuft derzeit nirgends | nicht anfassen |
 
 | Erlaubt | Verboten |
 |---|---|
